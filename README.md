@@ -26,10 +26,10 @@ It shows:
 
 - One dot per barrier culvert, coloured red (Absolutt/total) or orange
   (Partiell/partial), **sized by its priority score** (0-100: how much
-  upstream habitat would open up if that one were fixed, relative to
-  the other barriers on the map -- bigger dot = bigger win). Each dot
-  is snapped onto the nearest mapped stream, instead of the raw
-  (slightly imprecise) field coordinate.
+  upstream habitat -- river length AND lake area -- would open up if
+  that one were fixed, relative to the other barriers on the map --
+  bigger dot = bigger win). Each dot is snapped onto the nearest mapped
+  stream, instead of the raw (slightly imprecise) field coordinate.
 - *(If you ran step 4)* the WHOLE river/stream network from NVE's real
   Elvenett data (not just a picture -- actual line-by-line geometry),
   coloured:
@@ -53,18 +53,14 @@ It shows:
   for a confident flag, pale/outline purple for "worth checking in the
   field, not certain". A confident natural barrier also stops the
   upstream-habitat colouring, same as another culvert would.
-- *(If you ran step 5)* two more layers showing real river hydrology
-  instead of just a coloured line:
-  - **River width ribbons**, shaded by average discharge (how much
-    water the stream carries) -- an actual *area*, not just a line,
-    so a major river reads as a wide band and a small brook as a
-    thin one.
-  - **Lakes**, as NVE's own real (not estimated) lake polygons.
+- *(If you ran step 5)* **lakes**, as NVE's own real lake polygons --
+  an actual *area*, not just a line, and real measured data (not
+  estimated). Lakes count for a lot in the priority score too: a lake
+  holds far more fish than the same length of stream, see step 4.
 - Click any dot for details: place name, municipality, river/stream
   ("vassdrag"), the biologists' comments, diameter, length, priority
-  score, and how many km of river would open up if that culvert were
-  fixed. Click the river ribbon for its discharge, estimated width, and
-  estimated flow speed.
+  score, and how many km of river / km2 of lake would open up if that
+  culvert were fixed.
 
 ## How it works -- the pipeline
 
@@ -77,8 +73,8 @@ scripts/
   01_rens_kulvertdata.py        clean coordinates + classify barriers
   02_hent_hoydedata.py          (optional, needs internet) fetch elevation per point
   03_lag_kart.py                build the final interactive map (output/agder_kulvert_kart.html)
-  04_koble_til_elvenett.py      (optional, needs NVE river data) snap to river + trace upstream
-  05_hent_elveegenskaper.py     (optional, needs NVE hydrology data) discharge/width/lakes
+  04_koble_til_elvenett.py      (optional, needs NVE river data) snap to river + trace upstream + score
+  05_legg_til_innsjoer.py       (optional, needs NVE lake data) add the lake layer
 ```
 
 Run them in order (0, 2, 4, 5 are optional -- 1 then 3 alone already
@@ -159,10 +155,11 @@ the river network from step 4) and writes
 ### Step 4 -- (optional) snap to the real river network + colour it by impact
 
 ```bash
-python scripts/04_koble_til_elvenett.py --river data/raw/nve_elvenett/Elv_Elvenett.shp --kommune Arendal
+python scripts/04_koble_til_elvenett.py --river data/raw/nve_elvenett/Elv_Elvenett.shp --kommune Arendal --innsjo data/raw/nve_innsjo/Innsjo_Innsjo.shp
 ```
 
-This is what makes "how much space opens up upstream" possible. It:
+This is what makes "how much space opens up upstream" possible, and
+where the priority score is worked out. It:
 
 1. Loads NVE's **Elvenett** river network data -- real line-by-line
    geometry for every mapped stream, built as a proper network where
@@ -195,11 +192,16 @@ This is what makes "how much space opens up upstream" possible. It:
    barrier, orange upstream of a partial one, blue everywhere else. The
    result is `data/processed/elvenett_farget.geojson`, which step 3
    draws in full.
-5. Turns each culvert's (correctly-stopped) upstream length into a
-   **0-100 priority score**, relative to the other barriers processed
-   in the same run: 100 = fixing this one would open up the most
-   habitat of all of them, 0 = the least. This is what step 3 uses to
-   size each dot on the map.
+5. Turns each culvert's (correctly-stopped) upstream length -- and, if
+   you pass `--innsjo`, the surface area of any lakes along that
+   reachable stretch -- into a **0-100 priority score**. Rather than
+   inventing a "km of river is worth this many km2 of lake" exchange
+   rate, each culvert is ranked (0-1) on river length and separately on
+   lake area among the other barriers in this run, and the two ranks
+   are blended 50/50 (`LAKE_SCORE_WEIGHT` near the top of the script) --
+   100 = ranks at or near the top on the combined measure, 0 = the
+   least. This is what step 3 uses to size each dot on the map.
+   Without `--innsjo`, the score falls back to river length alone.
 
 Only "Absolutt" and "Partiell" culverts count as barriers here, since
 those are the only ones with an upstream stretch worth marking.
@@ -240,17 +242,16 @@ contains several folders under `NVEData/`; this project uses:
 | Folder in the export | Goes to | Used by |
 |---|---|---|
 | `Elv/Elv_Elvenett.*` | `data/raw/nve_elvenett/` | step 4 (network + barriers) |
-| `Nedborfelt/Nedborfelt_RegineEnhet.*` | `data/raw/nve_nedborfelt/` | step 5 (discharge) |
-| `Innsjo/Innsjo_Innsjo.*` | `data/raw/nve_innsjo/` | step 5 (lakes) |
+| `Innsjo/Innsjo_Innsjo.*` | `data/raw/nve_innsjo/` | step 4 (lake area for scoring) + step 5 (lake map layer) |
 
 (Each is 4-5 files -- `.shp`/`.shx`/`.dbf`/`.prj`/optionally `.cpg` --
 that belong together; unzip all of them, not just the `.shp`.) This
 project currently ships with an Arendal-kommune export already
 validated end-to-end against the real data (883 real stream segments,
-correct branching, sensible upstream lengths, 883/883 matched to a
-REGINE discharge unit). For another kommune, get a matching export and
-update `KOMMUNE_FILTER` (`scripts/03_lag_kart.py`) and `--kommune` to
-match.
+correct branching, sensible upstream lengths, 201 real lakes, 620 river
+segments confirmed running through a lake). For another kommune, get a
+matching export and update `KOMMUNE_FILTER` (`scripts/03_lag_kart.py`)
+and `--kommune` to match.
 
 **One thing worth a second look:** NVE digitizes Elvenett lines from
 upstream to downstream, and this script relies on that. The Arendal
@@ -263,50 +264,44 @@ more than 100 m from any mapped stream (12 of 44 in the current Arendal
 run) -- those are worth a manual look (either a coordinate error, or
 the culvert is on a stream too small for Elvenett to include).
 
-### Step 5 -- (optional) add discharge, estimated width, and lakes
+### Step 5 -- (optional) add the lake layer to the map
 
 ```bash
-python scripts/05_hent_elveegenskaper.py
+python scripts/05_legg_til_innsjoer.py --innsjo data/raw/nve_innsjo/Innsjo_Innsjo.shp
 ```
 
-This adds real hydrology data and turns the river from "just a line"
-into something closer to an actual water body:
+Copies NVE's real lake polygons (reprojected to plain longitude/
+latitude) to `data/processed/innsjoer.geojson` for step 3 to draw as an
+actual area layer. This is a display-only step -- the *scoring* use of
+lake area (factoring it into each culvert's priority score) happens in
+step 4 via `--innsjo`, since that's where the scoring lives; run step 4
+with `--innsjo` first if you want lake-aware scores, then this step to
+also see the lakes on the map.
 
-- **Average discharge** ("vannføring", m3/s) -- a genuine NVE number.
-  NVE's REGINE catchment units carry each unit's own local mean annual
-  inflow (`regineQ`, in million m3/year) and the inflow contributed by
-  everything upstream of it (`totTilsig`). Adding those two and
-  converting million-m3-per-year to a mean flow rate gives the
-  discharge past any point:
+**We looked for lake depth too, and it isn't in this data.** The plan
+was to combine depth and surface area into a volume-based "how much
+living space for fish" estimate, as requested -- but NVE's `Innsjo`
+export carries a `dybdekart` field for exactly this ("is there a depth
+survey for this lake"), and for all 201 lakes in the Arendal export
+it's empty: no bathymetry is on file for any of them here. Rather than
+invent a depth-from-surface-area formula -- which would have the same
+unfounded-precision problem as the river discharge/width estimate this
+project tried and then dropped (see the note below) -- the priority
+score currently uses lake **surface area** only, which is real,
+measured NVE data. If you can get real depth figures for any of these
+lakes (NVE's separate bathymetry surveys, where they exist, or a local
+source), that would be the right number to fold in.
 
-      Q (m3/s) = (regineQ + totTilsig) x 1,000,000 / (365.25 x 24 x 3600)
-
-  Every river segment carries a REGINE code (`vassdragNr`) that matches
-  one of these catchment units exactly (883/883 did, in the Arendal
-  data), so each segment gets that unit's discharge. One REGINE unit
-  usually covers several individual segments, so this is a
-  step-function approximation along the river, not a smooth increase
-  -- but it's real, sourced data, not a guess.
-- **Estimated width and flow speed.** NVE doesn't publish measured
-  channel width or velocity for every stream in this export (the
-  "Tverrprofil" cross-section data that comes with it measures the
-  whole valley floor for flood modelling, not the water's edge, and
-  only exists at 6 locations in Arendal anyway -- not enough to build a
-  general width layer from). So width and depth are calculated from
-  discharge using standard hydraulic-geometry formulas (width, depth
-  and velocity all scale with a power of discharge -- the classic
-  reference is Leopold & Maddock 1953). These are clearly labelled
-  "estimated" everywhere they appear (`bredde_est_m`, `hastighet_est_ms`
-  in the data) and should be read as "the right order of magnitude",
-  not a survey measurement -- there's no local calibration behind them.
-- **Lakes**, straight from NVE's own `Innsjø` polygons -- these are
-  real, measured area features, not estimated at all.
-
-The river is drawn as a buffered "ribbon" polygon (width = the
-estimated width above) instead of a plain line, coloured by discharge
-on a log scale (a trickle and a major river differ by orders of
-magnitude, so a straight linear colour scale would make everything
-except the biggest river look identical).
+*(An earlier version of this project also estimated river discharge,
+width, and flow speed, shown as a coloured "ribbon" layer. It's been
+removed: discharge was assigned per REGINE catchment unit, and since
+one unit typically covers a main-stem reach and its tributaries
+together, a small side-stream right next to a big river was shown with
+the same discharge/colour as the main river -- misleading rather than
+useful. Nothing currently replaces it; if you want a river-as-area
+visualisation, factor in a `vassdragNr`-based split between
+main-stem and tributary segments before estimating a per-segment
+discharge, unlike the flat per-unit assignment this project used.)*
 
 ## Setup
 
@@ -314,8 +309,8 @@ except the biggest river look identical).
 pip install -r requirements.txt
 python scripts/01_rens_kulvertdata.py
 python scripts/02_hent_hoydedata.py       # optional, needs internet, can take a while
-python scripts/04_koble_til_elvenett.py --river data/raw/nve_elvenett/Elv_Elvenett.shp --kommune Arendal
-python scripts/05_hent_elveegenskaper.py  # optional, discharge/width/lakes
+python scripts/04_koble_til_elvenett.py --river data/raw/nve_elvenett/Elv_Elvenett.shp --kommune Arendal --innsjo data/raw/nve_innsjo/Innsjo_Innsjo.shp
+python scripts/05_legg_til_innsjoer.py    # optional, lake map layer
 python scripts/03_lag_kart.py
 ```
 
@@ -350,25 +345,24 @@ time you view it.
 - **Rows without coordinates** (256 of 856) are simply excluded from
   the map, since there is nowhere to plot them; they still exist in the
   original data.
-- **Priority scores are relative, not absolute.** The 0-100 score is
-  scaled against the *other barriers processed in the same run* -- if
-  you change the kommune filter or the input data, the same culvert can
-  get a different score. It's meant for comparing barriers to each
-  other within one map, not as a fixed, portable number.
 - **Natural-barrier detection needs an elevation raster you supply**
   (`--dtm`) -- without one, only other Absolutt culverts stop the
   upstream walk, so a stretch of river blocked by a natural waterfall
   higher up (with no culvert involved) would still show as "opened up".
-- **Estimated width/depth/velocity are not measured.** They come from
-  generic textbook hydraulic-geometry formulas applied to the (real)
-  discharge number, not from any survey of this specific area. Treat
-  them as "roughly this size", especially near the coast where tidal
-  backwater can make the velocity estimate meaningless.
-- **Discharge is a step function along the river**, not a smooth
-  increase -- every segment inside the same REGINE catchment unit gets
-  the same number, since that's the resolution NVE's REGINE data
-  provides.
-- **Only covers Arendal right now.** The river/hydrology data and the
+  This is also why the shipped map has no natural-barrier icons on it
+  at all: `--dtm` was never passed, since there's no real elevation
+  raster for Arendal in this project yet -- the check was skipped, not
+  run and found nothing.
+- **Lake area in the score uses surface area only, not depth** -- NVE's
+  export has no bathymetry on file for any of the 201 Arendal lakes
+  (see step 5). A wide, shallow pond and a deep lake of the same
+  surface area currently score the same.
+- **Priority scores are relative, not absolute.** The 0-100 score is
+  ranked against the *other barriers processed in the same run* -- if
+  you change the kommune filter or the input data, the same culvert can
+  get a different score. It's meant for comparing barriers to each
+  other within one map, not as a fixed, portable number.
+- **Only covers Arendal right now.** The river/lake data and the
   `KOMMUNE_FILTER`/`--kommune` settings are scoped to Arendal. The
   pipeline works the same way for any other kommune once you have a
   matching NVE export for it.
@@ -378,9 +372,8 @@ time you view it.
 ```
 data/raw/                   source data, exported from Excel (small, no photos)
 data/raw/nve_elvenett/      NVE Elvenett river network shapefile for the current kommune (step 4)
-data/raw/nve_nedborfelt/    NVE REGINE catchment units, for discharge (step 5)
-data/raw/nve_innsjo/        NVE lake polygons (step 5)
-data/processed/             cleaned CSV/GeoJSON + coloured river network + hydrology (generated by scripts)
+data/raw/nve_innsjo/        NVE lake polygons (step 4 scoring + step 5 map layer)
+data/processed/             cleaned CSV/GeoJSON + coloured river network + lakes (generated by scripts)
 scripts/                    the six pipeline steps, run in order
 output/                     the final map (agder_kulvert_kart.html)
 ```

@@ -37,8 +37,11 @@ to the side of the actual stream. So instead we:
      barrier just because that happened to be part of the same mapped
      line.
   5. Add up the (correctly stopped) upstream length in km per culvert,
-     and turn that into a 0-100 **priority score**: the culvert whose
-     fix would open up the most habitat scores 100, relative to the
+     and -- if you point --innsjo at NVE's lake data -- also add up the
+     surface area of any lakes that stretch reaches, since a lake holds
+     far more fish than the same length of stream. These two feed into
+     a 0-100 **priority score**: the culvert whose fix would open up
+     the most habitat (by both measures) scores 100, relative to the
      other barriers in this run.
 
 Only culverts assessed as "Absolutt" (total barrier) or "Partiell"
@@ -144,6 +147,15 @@ SUSPICIOUS_SNAP_DISTANCE_M = 100.0
 NATURAL_GRADIENT_WINDOW_M = 100.0
 NATURAL_GRADIENT_CERTAIN = 0.10
 NATURAL_GRADIENT_CAUTIOUS = 0.07
+
+# The priority score blends two things: how much river length opens up,
+# and how much lake surface area opens up (lakes hold a lot more fish
+# per unit area than a stream reach, so they're weighted in too, not
+# just added to the length in some invented km-per-km2 exchange rate).
+# Each is ranked (0-1) among the culverts in this run, then blended by
+# this weight. 0.5 means "river length and lake area matter equally";
+# raise it to favour culverts that open up lakes more.
+LAKE_SCORE_WEIGHT = 0.5
 
 BLUE = "#2c7fb8"
 BARRIER_COLORS = {"Absolutt": "#d7191c", "Partiell": "#fdae61"}
@@ -342,6 +354,11 @@ def main():
         default=None,
         help="Optional path to a local elevation raster (GeoTIFF) to detect natural barriers",
     )
+    parser.add_argument(
+        "--innsjo",
+        default=str(ROOT / "data" / "raw" / "nve_innsjo" / "Innsjo_Innsjo.shp"),
+        help="Path to NVE's Innsjo (lake) shapefile, used to factor lake area into the priority score",
+    )
     args = parser.parse_args()
 
     river_path = Path(args.river)
@@ -369,6 +386,16 @@ def main():
     rivers = rivers[rivers.geometry.length > 0].reset_index(drop=True)
     print(f"  {len(rivers)} river line segments")
     name_col = "elvenavn" if "elvenavn" in rivers.columns else None
+
+    lakes = None
+    innsjo_path = Path(args.innsjo)
+    if innsjo_path.exists():
+        print(f"Reading lakes from {innsjo_path} ...")
+        lakes = gpd.read_file(innsjo_path).to_crs(WORK_CRS)
+        print(f"  {len(lakes)} lakes ({lakes['areal_km2'].sum():.2f} km2 total)")
+    else:
+        print(f"No lake file found at {innsjo_path} -- priority scores will be based on")
+        print("river length only (pass --innsjo to also factor in lake area)")
 
     print(f"Reading {culvert_csv} ...")
     all_culverts = pd.read_csv(culvert_csv)
@@ -469,7 +496,7 @@ def main():
         return pieces, total_length
 
     print("Tracing upstream from each culvert (stopping at other barriers) ...")
-    upstream_km, snap_dist_out, snap_lon, snap_lat = [], [], [], []
+    upstream_km, upstream_lake_km2, snap_dist_out, snap_lon, snap_lat = [], [], [], [], []
     edge_intervals = {}  # edge_idx -> list of (start, end, priority)
 
     for i, row in culvert_points.iterrows():
@@ -478,6 +505,16 @@ def main():
         priority = BARRIER_PRIORITY[category]
         for edge_idx, s, e in pieces:
             edge_intervals.setdefault(edge_idx, []).append((s, e, priority))
+
+        lake_km2 = 0.0
+        if lakes is not None and pieces:
+            piece_geoms = [substring(edge_geom[edge_idx], s, e) for edge_idx, s, e in pieces]
+            piece_geoms = [g for g in piece_geoms if not g.is_empty]
+            if piece_geoms:
+                reachable_union = piece_geoms[0] if len(piece_geoms) == 1 else gpd.GeoSeries(piece_geoms).union_all()
+                touching = lakes[lakes.geometry.intersects(reachable_union)]
+                lake_km2 = float(touching["areal_km2"].sum())
+        upstream_lake_km2.append(lake_km2)
 
         geom = rivers.geometry.iloc[snap_edge[i]]
         snapped_point = geom.interpolate(snap_proj[i])
@@ -491,16 +528,29 @@ def main():
     culverts["lat_snappet"] = snap_lat
     culverts["snap_avstand_m"] = snap_dist_out
     culverts["oppstrom_lengde_km"] = upstream_km
-    # Priority score: 100 = the culvert that would open up the most
-    # habitat of all the barriers processed in this run, 0 = the least.
-    culverts["prioriteringsscore"] = (
-        culverts["oppstrom_lengde_km"].rank(pct=True, method="average") * 100
-    ).round().astype(int)
+    culverts["oppstrom_innsjo_km2"] = upstream_lake_km2
+
+    # Priority score: rank each culvert on river length opened up AND
+    # lake area opened up (0-1 each), then blend the two -- rather than
+    # inventing a km-per-km2 exchange rate between "river" and "lake",
+    # which we have no real basis for. 100 = ranks at or near the top
+    # on the blended measure among the barriers processed in this run.
+    score_river = culverts["oppstrom_lengde_km"].rank(pct=True, method="average")
+    if lakes is not None:
+        score_lake = culverts["oppstrom_innsjo_km2"].rank(pct=True, method="average")
+        blended = LAKE_SCORE_WEIGHT * score_lake + (1 - LAKE_SCORE_WEIGHT) * score_river
+    else:
+        blended = score_river
+    culverts["prioriteringsscore"] = (blended * 100).round().astype(int)
 
     n_suspicious = (culverts["snap_avstand_m"] > SUSPICIOUS_SNAP_DISTANCE_M).sum()
     print(f"\n{n_suspicious} culverts snapped more than {SUSPICIOUS_SNAP_DISTANCE_M} m "
           f"away from their nearest river line -- worth a manual look.")
     print(f"Median upstream length unlocked: {culverts['oppstrom_lengde_km'].median():.2f} km")
+    if lakes is not None:
+        n_with_lake = (culverts["oppstrom_innsjo_km2"] > 0).sum()
+        print(f"{n_with_lake} of {len(culverts)} culverts have a lake somewhere upstream "
+              f"(total {culverts['oppstrom_innsjo_km2'].sum():.2f} km2 across all of them)")
 
     OUT_CSV.parent.mkdir(parents=True, exist_ok=True)
     culverts.drop(columns="geometry", errors="ignore").to_csv(OUT_CSV, index=False)

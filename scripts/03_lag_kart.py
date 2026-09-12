@@ -31,11 +31,18 @@ What ends up on the map
       already reach everything below it fine)
 
 * One dot per barrier culvert, coloured red (total) or orange
-  (partial). If you ran step 4, the dot sits at the point snapped onto
-  the nearest mapped stream, which is more reliable than the raw field
-  coordinate; click a dot to see both the snapped and original
-  position, how far apart they are, and how many km of river would
-  open up if that culvert were fixed.
+  (partial) and sized by priority score (see step 4 -- bigger dot =
+  fixing it opens up more habitat). If you ran step 4, the dot sits at
+  the point snapped onto the nearest mapped stream, which is more
+  reliable than the raw field coordinate; click a dot to see both the
+  snapped and original position, how far apart they are, and how much
+  river/lake habitat would open up if that culvert were fixed.
+
+* If you ran step 4 with `--dtm`: a small triangle icon wherever the
+  river's slope suggests a natural barrier -- solid for a confident
+  flag, pale for "worth checking, not certain".
+
+* If you ran step 5: NVE's real lake polygons, as an actual area layer.
 
 * A legend explaining the colours, and a layer switcher (top right) so
   you can turn layers or background maps on/off.
@@ -46,7 +53,6 @@ Usage
 """
 
 import json
-import math
 from pathlib import Path
 
 import folium
@@ -60,7 +66,6 @@ IN_CSV_CANDIDATES = [
 ]
 IN_GEOJSON_RIVERS = ROOT / "data" / "processed" / "elvenett_farget.geojson"
 IN_GEOJSON_NATURAL = ROOT / "data" / "processed" / "naturlige_hindre.geojson"
-IN_GEOJSON_WIDTH = ROOT / "data" / "processed" / "elvenett_egenskaper.geojson"
 IN_GEOJSON_LAKES = ROOT / "data" / "processed" / "innsjoer.geojson"
 OUT_HTML = ROOT / "output" / "agder_kulvert_kart.html"
 
@@ -143,6 +148,7 @@ def build_popup_html(row, has_height, has_snap):
         html += "<hr style='margin:4px 0'>"
         html += field("Prioriteringsscore (0-100)", row.get("prioriteringsscore"))
         html += field("Oppstrøms elvestrekning som åpnes", row.get("oppstrom_lengde_km"), " km")
+        html += field("Oppstrøms innsjøareal som åpnes", row.get("oppstrom_innsjo_km2"), " km2")
         html += field("Avstand kartlagt punkt -> elvenett", row.get("snap_avstand_m"), " m")
     html += field("Kommentar", row.get("kommentar"))
     html += "</div>"
@@ -225,7 +231,7 @@ def add_legend(m, has_rivers, has_score, has_natural):
     if has_score:
         rows += (
             "<div style='margin:2px 0 6px 0'>Størrelse på prikk = "
-            "prioriteringsscore (større = mer elv åpnes opp)</div>"
+            "prioriteringsscore (større = mer elv/innsjø åpnes opp)</div>"
         )
     for cat in BARRIER_ORDER:
         rows += (
@@ -280,45 +286,6 @@ def add_river_layer(m, geojson):
             "opacity": 0.85,
         },
         tooltip=folium.GeoJsonTooltip(fields=["elvenavn"], aliases=["Elv/bekk:"]),
-    ).add_to(group)
-    group.add_to(m)
-
-
-def discharge_color(q_m3s):
-    """Light -> dark blue on a log scale, since discharge in this
-    dataset spans several orders of magnitude (a trickle to a major
-    river)."""
-    low, high = -2, 2.2  # log10(0.01) .. log10(~160)
-    t = (math.log10(max(q_m3s, 0.01)) - low) / (high - low)
-    t = min(1.0, max(0.0, t))
-    light, dark = (222, 235, 247), (8, 48, 107)
-    rgb = [int(light[i] + (dark[i] - light[i]) * t) for i in range(3)]
-    return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
-
-
-def add_width_layer(m, geojson):
-    """The estimated river-width 'ribbons' -- an area instead of a
-    plain line, coloured by discharge. Added before the barrier-colour
-    river layer so that layer's lines still draw crisply on top."""
-    group = folium.FeatureGroup(name="Elv - anslått bredde og vannføring", show=True)
-    folium.GeoJson(
-        geojson,
-        style_function=lambda feature: {
-            "fillColor": discharge_color(feature["properties"]["vannforing_m3s"]),
-            "color": discharge_color(feature["properties"]["vannforing_m3s"]),
-            "weight": 0.5,
-            "fillOpacity": 0.55,
-        },
-        tooltip=folium.GeoJsonTooltip(
-            fields=["elvenavn", "vannforing_m3s", "bredde_est_m", "hastighet_est_ms", "nedborfelt_km2"],
-            aliases=[
-                "Elv/bekk:",
-                "Vannføring (m3/s):",
-                "Anslått bredde (m):",
-                "Anslått hastighet (m/s):",
-                "Nedbørfelt (km2):",
-            ],
-        ),
     ).add_to(group)
     group.add_to(m)
 
@@ -383,7 +350,6 @@ def main():
     has_score = "prioriteringsscore" in df.columns
     river_geojson = load_geojson(IN_GEOJSON_RIVERS)
     natural_geojson = load_geojson(IN_GEOJSON_NATURAL)
-    width_geojson = load_geojson(IN_GEOJSON_WIDTH)
     lake_geojson = load_geojson(IN_GEOJSON_LAKES)
 
     positions = df.apply(lambda r: marker_position(r, has_snap), axis=1, result_type="expand")
@@ -395,14 +361,11 @@ def main():
     m = folium.Map(location=[center_lat, center_lon], zoom_start=11, tiles=None)
     add_base_layers(m)
 
-    if width_geojson is not None:
-        add_width_layer(m, width_geojson)
-    else:
-        print("(no data/processed/elvenett_egenskaper.geojson found -- run")
-        print(" scripts/05_hent_elveegenskaper.py to add discharge/width)")
-
     if lake_geojson is not None:
         add_lake_layer(m, lake_geojson)
+    else:
+        print("(no data/processed/innsjoer.geojson found -- run")
+        print(" scripts/05_legg_til_innsjoer.py to add the lake layer)")
 
     if river_geojson is not None:
         add_river_layer(m, river_geojson)
