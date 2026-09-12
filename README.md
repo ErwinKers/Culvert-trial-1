@@ -206,11 +206,27 @@ where the priority score is worked out. It:
 Only "Absolutt" and "Partiell" culverts count as barriers here, since
 those are the only ones with an upstream stretch worth marking.
 
-**Detecting natural barriers (optional, needs an elevation raster):**
-pass `--dtm path/to/dtm.tif` pointing at a local "digital terrain
-model" GeoTIFF (e.g. from Kartverket's <https://hoydedata.no/>
-download service) to also flag/stop at natural barriers, not just
-other culverts.
+**Detecting natural barriers (optional, needs elevation data) -- two
+ways to get it:**
+
+- `--hoyde-api` -- **no file to download.** Uses Kartverket's free
+  point-elevation web service (the same one step 2 already uses) to
+  look up elevation directly, over the internet, at just the ~2 points
+  per river segment this method actually needs (roughly 1,800 requests
+  for Arendal's 883 segments -- the same order of magnitude as step
+  2's per-culvert lookups, not the thousands you'd need for a dense
+  scan). Cached to `data/processed/hoyde_cache_elvenett.json`, so a
+  re-run only fetches what's missing. This is the easiest option if
+  you just want to try the feature.
+- `--dtm path/to/dtm.tif` -- a local "digital terrain model" GeoTIFF
+  you already have (e.g. from Kartverket's <https://hoydedata.no/>
+  download service, the same site style as the NVE map data export).
+  Works fully offline once you have the file; worth it if you're doing
+  this for many kommuner and don't want to make thousands of
+  individual web requests.
+
+Either way, both flag *and* stop at natural barriers, not just other
+culverts.
 
 The method is a **gradient smoothed over ~100 m of river**, not just
 one segment's own (sometimes short and noisy) slope: for every stretch
@@ -227,13 +243,18 @@ needed to gather that much length), and classify it:
 Both thresholds and the 100 m window size are constants near the top
 of the script if you want to tune them.
 
-Without `--dtm`, natural-barrier detection is simply skipped and only
-Absolutt culverts stop the walk -- everything else still works.
+Without either flag, natural-barrier detection is simply skipped and
+only Absolutt culverts stop the walk -- everything else still works.
 
-*(This part of the script was validated against small hand-built test
-rasters with known slopes in them -- 12%, 8%, and 3% steps, correctly
-sorted into "certain"/"cautious"/"not flagged" -- not against a real
-DTM, since we don't have one for Arendal yet.)*
+*(The gradient classification itself was validated against small
+hand-built test rasters with known slopes in them -- 12%, 8%, and 3%
+steps, correctly sorted into "certain"/"cautious"/"not flagged". The
+`--hoyde-api` plumbing (coordinate conversion, caching, the live HTTP
+call) was validated by mocking the API response end-to-end -- correct
+coordinates were sent and the results flowed through correctly -- but
+neither path has been run against real elevation data for Arendal yet,
+since this sandbox can't reach Kartverket's service and we don't have
+a downloaded DTM file either.)*
 
 **Where to get the river data:** an NVE map data export
 (`nedlasting.nve.no`) for the kommune you want to cover. The `.zip`
@@ -260,9 +281,16 @@ lengths), but if a river you know well looks reversed on the map
 (orange/red appearing *downstream* of a barrier instead of upstream),
 set `REVERSE_FLOW_DIRECTION = True` near the top of the script and
 re-run. Also check the console output for how many culverts snapped
-more than 100 m from any mapped stream (12 of 44 in the current Arendal
-run) -- those are worth a manual look (either a coordinate error, or
-the culvert is on a stream too small for Elvenett to include).
+more than `SUSPICIOUS_SNAP_DISTANCE_M` (50 m) from any mapped stream
+(13 of 44 in the current Arendal run) -- those are worth a manual look
+(either a coordinate error, or the culvert is on a stream too small for
+Elvenett to include). **Step 3 draws these on the map too:** a dashed
+line from the original field coordinate to the point actually used,
+with a small white/black dot marking the original -- so a coordinate
+that lands in the middle of a lake, or nowhere near any mapped stream,
+is immediately visible instead of silently trusted. Only shown beyond
+50 m (`SNAP_WARNING_DISTANCE_M` in `scripts/03_lag_kart.py`) since a
+few metres of GPS noise is normal and not worth flagging.
 
 ### Step 5 -- (optional) add the lake layer to the map
 
@@ -345,14 +373,16 @@ time you view it.
 - **Rows without coordinates** (256 of 856) are simply excluded from
   the map, since there is nowhere to plot them; they still exist in the
   original data.
-- **Natural-barrier detection needs an elevation raster you supply**
-  (`--dtm`) -- without one, only other Absolutt culverts stop the
-  upstream walk, so a stretch of river blocked by a natural waterfall
-  higher up (with no culvert involved) would still show as "opened up".
-  This is also why the shipped map has no natural-barrier icons on it
-  at all: `--dtm` was never passed, since there's no real elevation
-  raster for Arendal in this project yet -- the check was skipped, not
-  run and found nothing.
+- **Natural-barrier detection needs elevation data** (`--dtm` or
+  `--hoyde-api`) -- without either, only other Absolutt culverts stop
+  the upstream walk, so a stretch of river blocked by a natural
+  waterfall higher up (with no culvert involved) would still show as
+  "opened up". This is also why the shipped map has no natural-barrier
+  icons on it at all: neither flag was passed when it was built, since
+  this sandbox can't reach Kartverket's API and there's no downloaded
+  DTM file in the project either -- the check was skipped, not run and
+  found nothing. Pass `--hoyde-api` yourself (needs internet, no
+  download) to actually see this layer.
 - **Lake area in the score uses surface area only, not depth** -- NVE's
   export has no bathymetry on file for any of the 201 Arendal lakes
   (see step 5). A wide, shallow pond and a deep lake of the same

@@ -44,6 +44,14 @@ What ends up on the map
 
 * If you ran step 5: NVE's real lake polygons, as an actual area layer.
 
+* If you ran step 4: a dashed line + small white/black dot for any
+  culvert whose original field coordinate sits more than
+  `SNAP_WARNING_DISTANCE_M` (50 m) from the mapped stream it got
+  snapped to -- e.g. a coordinate that landed in the middle of a lake,
+  or somewhere with no nearby waterway at all. The line points from the
+  (probably wrong) original point to the point actually used on the
+  map, so you can see at a glance what the data problem looks like.
+
 * A legend explaining the colours, and a layer switcher (top right) so
   you can turn layers or background maps on/off.
 
@@ -89,6 +97,13 @@ BARRIER_LABELS = {
 }
 BARRIER_COLORS = {"Absolutt": "#d7191c", "Partiell": "#fdae61"}
 BLUE = "#2c7fb8"
+
+# A culvert snapped further than this from its original field
+# coordinate probably has a bad coordinate (e.g. it lands in a lake, or
+# nowhere near any mapped stream) -- draw a line back to the original
+# point so the problem is visible on the map, rather than silently
+# trusting the snap.
+SNAP_WARNING_DISTANCE_M = 50.0
 
 
 def load_data():
@@ -226,7 +241,7 @@ def add_base_layers(m):
     ).add_to(m)
 
 
-def add_legend(m, has_rivers, has_score, has_natural):
+def add_legend(m, has_rivers, has_score, has_natural, has_snap_warning):
     rows = ""
     if has_score:
         rows += (
@@ -263,6 +278,13 @@ def add_legend(m, has_rivers, has_score, has_natural):
                 f"border-bottom:11px solid {color};margin-right:6px;vertical-align:middle'></span>"
                 f"{label}</div>"
             )
+    if has_snap_warning:
+        rows += (
+            f"<div style='margin:2px 0'>"
+            f"<span style='display:inline-block;width:16px;border-top:2px dashed black;"
+            f"margin-right:6px;vertical-align:middle'></span>"
+            f"Feltkoordinat &gt;{SNAP_WARNING_DISTANCE_M:.0f} m fra elvenett -- sjekk denne</div>"
+        )
 
     legend_html = f"""
     <div style="
@@ -299,6 +321,48 @@ def add_lake_layer(m, geojson):
         tooltip=folium.GeoJsonTooltip(fields=fields, aliases=["Navn:", "Areal (km2):"][: len(fields)]) if fields else None,
     ).add_to(group)
     group.add_to(m)
+
+
+def add_snap_warning_layer(m, df):
+    """For culverts snapped a long way from their original field
+    coordinate, draw a line from the (likely wrong) original point to
+    the point actually used, so the data problem is visible rather than
+    silently trusted."""
+    flagged = df[df["snap_avstand_m"] > SNAP_WARNING_DISTANCE_M]
+    if flagged.empty:
+        return 0
+
+    group = folium.FeatureGroup(
+        name=f"Advarsel: langt fra elvenett (>{SNAP_WARNING_DISTANCE_M:.0f} m)", show=True
+    )
+    for _, row in flagged.iterrows():
+        popup_html = (
+            f"<b>Stort avvik mellom feltkoordinat og elvenett</b><br>"
+            f"Sted: {row.get('stedsnavn') or '(ukjent)'}<br>"
+            f"Avstand: {row['snap_avstand_m']:.0f} m"
+        )
+        folium.PolyLine(
+            locations=[[row["lat_ned"], row["lon_ned"]], [row["lat_snappet"], row["lon_snappet"]]],
+            color="#000000",
+            weight=2,
+            dash_array="5,5",
+            opacity=0.9,
+            popup=folium.Popup(popup_html, max_width=260),
+        ).add_to(group)
+        # A small marker right on the original (probably wrong) point,
+        # since it otherwise has nothing drawn there at all.
+        folium.CircleMarker(
+            location=[row["lat_ned"], row["lon_ned"]],
+            radius=4,
+            color="#000000",
+            weight=2,
+            fill=True,
+            fill_color="#ffffff",
+            fill_opacity=1,
+            popup=folium.Popup(popup_html, max_width=260),
+        ).add_to(group)
+    group.add_to(m)
+    return len(flagged)
 
 
 def natural_barrier_icon(tier):
@@ -398,7 +462,20 @@ def main():
     for group in groups.values():
         group.add_to(m)
 
-    add_legend(m, river_geojson is not None, has_score, natural_geojson is not None and bool(natural_geojson["features"]))
+    n_flagged = 0
+    if has_snap:
+        n_flagged = add_snap_warning_layer(m, df)
+        if n_flagged:
+            print(f"{n_flagged} culvert(s) snapped more than {SNAP_WARNING_DISTANCE_M:.0f} m from "
+                  f"their field coordinate -- shown with a dashed line on the map")
+
+    add_legend(
+        m,
+        river_geojson is not None,
+        has_score,
+        natural_geojson is not None and bool(natural_geojson["features"]),
+        n_flagged > 0,
+    )
     folium.LayerControl(collapsed=False).add_to(m)
 
     # Zoom to fit all the points instead of a fixed zoom level.

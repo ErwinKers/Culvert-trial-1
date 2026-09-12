@@ -60,14 +60,31 @@ point is downstream).
 
     python scripts/04_koble_til_elvenett.py --river data/raw/nve_elvenett/Elv_Elvenett.shp --kommune Arendal
 
-Detecting natural barriers (optional, needs an elevation raster)
-------------------------------------------------------------------
-Pass --dtm pointing at a local "digital terrain model" GeoTIFF (e.g.
-from Kartverket's https://hoydedata.no/ download service) to also flag
-naturally-impassable stretches of river and stop the upstream walk
-there too:
+Detecting natural barriers (optional, needs elevation data)
+---------------------------------------------------------------
+Two ways to get elevation data for this, pick one:
+
+  --dtm path/to/dtm.tif
+      A local "digital terrain model" GeoTIFF you already have (e.g.
+      downloaded from Kartverket's https://hoydedata.no/ service).
+      Works offline once you have the file.
+
+  --hoyde-api
+      Uses Kartverket's free point-elevation web service instead (the
+      same one step 2 uses) -- no file to download at all, just
+      internet access. This works here specifically because we only
+      need ~2 elevation samples per river segment (the endpoints of
+      each segment's smoothed 100 m window), not a dense grid --
+      roughly 1,800 requests for Arendal's 883 segments, comparable to
+      what step 2 already does for culvert points. Results are cached
+      in data/processed/hoyde_cache_elvenett.json, so a re-run only
+      fetches points it doesn't already have.
+
+If neither is given, natural-barrier detection is simply skipped.
 
     python scripts/04_koble_til_elvenett.py --river ... --dtm data/raw/dtm/arendal_dtm.tif
+    # or, no file needed:
+    python scripts/04_koble_til_elvenett.py --river ... --hoyde-api
 
 The method: for every river segment, we compute the *slope smoothed
 over a 100 m stretch of river* centred on it -- not just the segment's
@@ -91,9 +108,9 @@ this steep is a real obstacle to fish regardless of any culvert:
                                             automatically discard
                                             habitat)
 
-Without --dtm, natural-barrier detection is simply skipped (only
-man-made Absolutt barriers stop the walk) -- the rest of the script
-still works fine.
+Without --dtm or --hoyde-api, natural-barrier detection is simply
+skipped (only man-made Absolutt barriers stop the walk) -- the rest of
+the script still works fine.
 
 This part of the script has been validated against a small hand-built
 test raster with a known slope in it (see the session notes), not
@@ -110,6 +127,7 @@ backwards, flip REVERSE_FLOW_DIRECTION below and re-run.
 
 import argparse
 import json
+import time
 from pathlib import Path
 
 import geopandas as gpd
@@ -126,6 +144,7 @@ IN_CSV_CANDIDATES = [
 OUT_CSV = ROOT / "data" / "processed" / "kulvert_punkter_oppstrom.csv"
 OUT_GEOJSON = ROOT / "data" / "processed" / "elvenett_farget.geojson"
 OUT_NATURAL_GEOJSON = ROOT / "data" / "processed" / "naturlige_hindre.geojson"
+HOYDE_CACHE_FILE = ROOT / "data" / "processed" / "hoyde_cache_elvenett.json"
 
 # A projected, metre-based coordinate system to do the distance/length
 # math in (this matches the CRS NVE delivers Elvenett in).
@@ -139,7 +158,7 @@ NODE_SNAP_TOLERANCE_M = 1.0
 # A culvert whose nearest river point is farther away than this is
 # probably not actually matched to the right stream -- we still snap
 # it (nothing better to do), but flag it so you can review it.
-SUSPICIOUS_SNAP_DISTANCE_M = 100.0
+SUSPICIOUS_SNAP_DISTANCE_M = 50.0
 
 # Natural-barrier screening: gradient smoothed over this many metres of
 # river (roughly half upstream, half downstream of each point), and the
@@ -236,7 +255,78 @@ def _walk_distance(G, edge_geom, start_edge, start_dist, target_distance, direct
     return edge_geom[edge_idx].interpolate(dist), covered
 
 
-def find_natural_barrier_candidates(G, edge_geom, dtm_path):
+def make_raster_elevation_lookup(dtm_path):
+    """Elevation lookup backed by a local GeoTIFF (rasterio). Returns
+    (elevation_at, cleanup) -- call cleanup() when done to close the
+    file."""
+    import rasterio
+
+    src = rasterio.open(dtm_path)
+    bounds = src.bounds
+
+    def elevation_at(point):
+        if not (bounds.left <= point.x <= bounds.right and bounds.bottom <= point.y <= bounds.top):
+            return None
+        return next(src.sample([(point.x, point.y)]))[0]
+
+    return elevation_at, src.close
+
+
+def make_api_elevation_lookup(work_crs, cache_path):
+    """Elevation lookup backed by Kartverket's free point-elevation web
+    service (the same one step 2 uses), so natural-barrier detection
+    works without downloading any DTM file at all -- see the "Where to
+    get elevation data" note in the module docstring for why this is
+    feasible here (a couple of points per river segment, not a dense
+    grid). Returns (elevation_at, cleanup) -- cleanup() saves the cache
+    to disk and should be called when done (also called periodically
+    during the run, so an interrupted run doesn't lose progress)."""
+    import requests
+    from pyproj import Transformer
+
+    API_URL = "https://ws.geonorge.no/hoydedata/v1/punkt"
+    to_wgs84 = Transformer.from_crs(work_crs, "EPSG:4326", always_xy=True)
+    session = requests.Session()
+
+    cache = {}
+    if cache_path.exists():
+        with open(cache_path, "r", encoding="utf-8") as f:
+            cache = json.load(f)
+    calls_made = 0
+
+    def save_cache():
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(cache, f)
+
+    def elevation_at(point):
+        nonlocal calls_made
+        lon, lat = to_wgs84.transform(point.x, point.y)
+        key = f"{round(lat, 6)},{round(lon, 6)}"
+        if key in cache:
+            return cache[key]
+        try:
+            r = session.get(
+                API_URL, params={"nord": lat, "ost": lon, "koordsystemkode": 4326, "geojson": "false"}, timeout=10
+            )
+            r.raise_for_status()
+            punkter = r.json().get("punkter") or []
+            z = punkter[0].get("z") if punkter else None
+        except Exception as exc:  # noqa: BLE001 - one bad point shouldn't crash the run
+            print(f"    Could not fetch height for ({lat}, {lon}): {exc}")
+            z = None
+        cache[key] = z
+        calls_made += 1
+        if calls_made % 50 == 0:
+            save_cache()
+            print(f"    ... {calls_made} elevation points fetched so far")
+        time.sleep(0.2)  # be gentle with the free API, same pause step 2 uses
+        return z
+
+    return elevation_at, save_cache
+
+
+def find_natural_barrier_candidates(G, edge_geom, elevation_at):
     """For every edge, the gradient (fraction, positive = downhill
     going downstream) smoothed over NATURAL_GRADIENT_WINDOW_M of river
     centred on the edge's midpoint. For edges already longer than the
@@ -244,28 +334,21 @@ def find_natural_barrier_candidates(G, edge_geom, dtm_path):
     walks into neighbouring edges just far enough to make up the
     difference -- never diluting a short, genuinely steep edge by
     tacking on extra length it doesn't need. Returns
-    {edge_idx: gradient}."""
-    import rasterio
-
+    {edge_idx: gradient}. Only 2 elevation lookups per edge (its
+    smoothed-window endpoints), so ~2x the number of river segments in
+    total -- see make_api_elevation_lookup if you don't have a DTM
+    file."""
     half_window = NATURAL_GRADIENT_WINDOW_M / 2
     gradients = {}
-    with rasterio.open(dtm_path) as src:
-        bounds = src.bounds
-
-        def elevation_at(point):
-            if not (bounds.left <= point.x <= bounds.right and bounds.bottom <= point.y <= bounds.top):
-                return None
-            return next(src.sample([(point.x, point.y)]))[0]
-
-        for idx, geom in edge_geom.items():
-            mid_dist = geom.length / 2
-            up_point, up_covered = _walk_distance(G, edge_geom, idx, mid_dist, half_window, "up")
-            down_point, down_covered = _walk_distance(G, edge_geom, idx, mid_dist, half_window, "down")
-            z_up, z_down = elevation_at(up_point), elevation_at(down_point)
-            total_len = up_covered + down_covered
-            if z_up is None or z_down is None or total_len <= 1e-6:
-                continue
-            gradients[idx] = (z_up - z_down) / total_len
+    for idx, geom in edge_geom.items():
+        mid_dist = geom.length / 2
+        up_point, up_covered = _walk_distance(G, edge_geom, idx, mid_dist, half_window, "up")
+        down_point, down_covered = _walk_distance(G, edge_geom, idx, mid_dist, half_window, "down")
+        z_up, z_down = elevation_at(up_point), elevation_at(down_point)
+        total_len = up_covered + down_covered
+        if z_up is None or z_down is None or total_len <= 1e-6:
+            continue
+        gradients[idx] = (z_up - z_down) / total_len
     return gradients
 
 
@@ -355,6 +438,14 @@ def main():
         help="Optional path to a local elevation raster (GeoTIFF) to detect natural barriers",
     )
     parser.add_argument(
+        "--hoyde-api",
+        action="store_true",
+        help=(
+            "Detect natural barriers using Kartverket's free elevation API instead of a local "
+            "DTM file (needs internet, no download required). Ignored if --dtm is also given."
+        ),
+    )
+    parser.add_argument(
         "--innsjo",
         default=str(ROOT / "data" / "raw" / "nve_innsjo" / "Innsjo_Innsjo.shp"),
         help="Path to NVE's Innsjo (lake) shapefile, used to factor lake area into the priority score",
@@ -423,9 +514,18 @@ def main():
     nearest = nearest[~nearest.index.duplicated(keep="first")]  # exact ties -> keep first
 
     natural_cut_by_edge = {}
+    elevation_at, cleanup_elevation = None, None
     if args.dtm:
         print(f"Sampling elevation from {args.dtm} to screen for natural barriers ...")
-        gradients = find_natural_barrier_candidates(G, edge_geom, args.dtm)
+        elevation_at, cleanup_elevation = make_raster_elevation_lookup(args.dtm)
+    elif args.hoyde_api:
+        print("Using Kartverket's elevation API to screen for natural barriers")
+        print("(needs internet; ~2 requests per river segment, cached to disk) ...")
+        elevation_at, cleanup_elevation = make_api_elevation_lookup(WORK_CRS, HOYDE_CACHE_FILE)
+
+    if elevation_at is not None:
+        gradients = find_natural_barrier_candidates(G, edge_geom, elevation_at)
+        cleanup_elevation()
         natural_cut_by_edge, natural_features = classify_natural_barriers(gradients, edge_geom, rivers, name_col)
         n_certain = sum(1 for f in natural_features if f["properties"]["tier"] == "sikker")
         n_cautious = len(natural_features) - n_certain
@@ -435,8 +535,8 @@ def main():
             json.dump({"type": "FeatureCollection", "features": natural_features}, f, ensure_ascii=False, default=str)
         print(f"  saved {OUT_NATURAL_GEOJSON}")
     else:
-        print("No --dtm given -- skipping natural-barrier screening (only man-made")
-        print("Absolutt barriers will stop the upstream walk).")
+        print("No --dtm or --hoyde-api given -- skipping natural-barrier screening")
+        print("(only man-made Absolutt barriers will stop the upstream walk).")
 
     # Snap position (edge + distance-from-upstream-end) for every
     # processed culvert, keyed by row index, plus a lookup of which
