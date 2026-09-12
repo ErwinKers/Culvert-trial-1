@@ -131,6 +131,7 @@ def build_popup_html(row, has_height, has_snap):
         html += field("Høydeforskjell", row.get("elevation_diff_m"), " m")
     if has_snap:
         html += "<hr style='margin:4px 0'>"
+        html += field("Prioriteringsscore (0-100)", row.get("prioriteringsscore"))
         html += field("Oppstrøms elvestrekning som åpnes", row.get("oppstrom_lengde_km"), " km")
         html += field("Avstand kartlagt punkt -> elvenett", row.get("snap_avstand_m"), " m")
     html += field("Kommentar", row.get("kommentar"))
@@ -138,18 +139,28 @@ def build_popup_html(row, has_height, has_snap):
     return html
 
 
-def marker_radius(row, has_height):
-    if not has_height:
-        return 6
-    diff = row.get("elevation_diff_m")
-    if pd.isna(diff):
-        return 6
-    # Bigger height drop -> bigger dot. Clamp so one huge outlier
-    # doesn't dwarf everything else on the map.
-    return max(5, min(5 + diff, 16))
+def marker_radius(row, has_score, has_height):
+    # Priority score (how much habitat opens up) is the most useful
+    # thing to show at a glance, so it takes priority over elevation
+    # for sizing the dot: a bigger dot means fixing that culvert would
+    # unlock more river for anadromous fish.
+    if has_score and pd.notna(row.get("prioriteringsscore")):
+        score = row["prioriteringsscore"]
+        return 5 + (score / 100) * 12  # ranges roughly 5-17
+    if has_height and pd.notna(row.get("elevation_diff_m")):
+        diff = row["elevation_diff_m"]
+        return max(5, min(5 + diff, 16))
+    return 6
 
 
 def add_base_layers(m):
+    # NOTE: folium/Leaflet stacks base layers in the order they're added
+    # and shows whichever ones have show=True on top of each other -- so
+    # exactly ONE of these must be show=True, or you'll see whichever
+    # was added last (which is how this map used to default to the
+    # aerial photo layer without anyone asking for that). OpenTopoMap is
+    # the intended default: a real map style (not a photo), with contour
+    # lines/hillshading for terrain.
     folium.TileLayer(
         tiles="https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
         attr=(
@@ -160,6 +171,7 @@ def add_base_layers(m):
         max_zoom=17,
         overlay=False,
         control=True,
+        show=True,
     ).add_to(m)
 
     folium.TileLayer(
@@ -167,6 +179,7 @@ def add_base_layers(m):
         name="OpenStreetMap (vanlig kart)",
         overlay=False,
         control=True,
+        show=False,
     ).add_to(m)
 
     folium.TileLayer(
@@ -175,9 +188,10 @@ def add_base_layers(m):
             "World_Imagery/MapServer/tile/{z}/{y}/{x}"
         ),
         attr="Tiles &copy; Esri",
-        name="Esri satellittbilde",
+        name="Esri satellittbilde (flyfoto)",
         overlay=False,
         control=True,
+        show=False,
     ).add_to(m)
 
     # Kartverket's own topographic map is normally the most detailed
@@ -196,8 +210,13 @@ def add_base_layers(m):
     ).add_to(m)
 
 
-def add_legend(m, has_rivers):
+def add_legend(m, has_rivers, has_score):
     rows = ""
+    if has_score:
+        rows += (
+            "<div style='margin:2px 0 6px 0'>Størrelse på prikk = "
+            "prioriteringsscore (større = mer elv åpnes opp)</div>"
+        )
     for cat in BARRIER_ORDER:
         rows += (
             f"<div style='margin:2px 0'>"
@@ -249,6 +268,7 @@ def main():
     df = load_data()
     has_height = "elevation_diff_m" in df.columns
     has_snap = "lat_snappet" in df.columns
+    has_score = "prioriteringsscore" in df.columns
     river_geojson = load_river_geojson()
 
     positions = df.apply(lambda r: marker_position(r, has_snap), axis=1, result_type="expand")
@@ -276,7 +296,7 @@ def main():
 
         folium.CircleMarker(
             location=[row["_map_lat"], row["_map_lon"]],
-            radius=marker_radius(row, has_height),
+            radius=marker_radius(row, has_score, has_height),
             color=BARRIER_COLORS[cat],
             fill=True,
             fill_color=BARRIER_COLORS[cat],
@@ -288,7 +308,7 @@ def main():
     for group in groups.values():
         group.add_to(m)
 
-    add_legend(m, river_geojson is not None)
+    add_legend(m, river_geojson is not None, has_score)
     folium.LayerControl(collapsed=False).add_to(m)
 
     # Zoom to fit all the points instead of a fixed zoom level.

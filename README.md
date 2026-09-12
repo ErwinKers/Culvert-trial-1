@@ -24,28 +24,33 @@ install to just *view* it. The map only shows culverts that are
 actually migration barriers -- everything else is left out on purpose.
 It shows:
 
-- One dot per barrier culvert:
-  | Colour | Category | Meaning |
-  |---|---|---|
-  | 🔴 red | Absolutt | Total barrier -- fish cannot pass |
-  | 🟠 orange | Partiell | Partial barrier -- passable under some conditions/for some fish |
-- A switchable background map, including a terrain/relief layer
-  (OpenTopoMap) that shows contour lines and hillshading, so you can
-  see slopes and valleys.
+- One dot per barrier culvert, coloured red (Absolutt/total) or orange
+  (Partiell/partial), **sized by its priority score** (0-100: how much
+  upstream habitat would open up if that one were fixed, relative to
+  the other barriers on the map -- bigger dot = bigger win). Each dot
+  is snapped onto the nearest mapped stream, instead of the raw
+  (slightly imprecise) field coordinate.
 - *(If you ran step 4)* the WHOLE river/stream network from NVE's real
   Elvenett data (not just a picture -- actual line-by-line geometry),
   coloured:
   | Colour | Meaning |
   |---|---|
-  | 🔴 red | Upstream of a total barrier |
-  | 🟠 orange | Upstream of a partial barrier |
-  | 🔵 blue | Not affected -- either nowhere near a barrier, or downstream of one (a barrier only blocks upward passage) |
+  | 🔴 red | Upstream of a total barrier (and not blocked by anything else before reaching it) |
+  | 🟠 orange | Upstream of a partial barrier (same condition) |
+  | 🔵 blue | Not affected -- either nowhere near a barrier, or downstream of one (a barrier only blocks upward passage), or upstream of a point fish can't reach anyway |
 
-  Each barrier dot is also snapped onto the nearest mapped stream,
-  instead of the raw (slightly imprecise) field coordinate.
+  The colouring stops exactly at the point of another blocking barrier
+  further upstream (another Absolutt culvert, or -- if you supply
+  elevation data -- a natural waterfall/rapid too steep to climb), so a
+  stretch of river only counts as "opened up" if fixing that one
+  culvert would genuinely make it reachable.
+- A switchable background map, including a terrain/relief layer
+  (OpenTopoMap, the default) that shows contour lines and hillshading,
+  so you can see slopes and valleys.
 - Click any dot for details: place name, municipality, river/stream
-  ("vassdrag"), the biologists' comments, diameter, length, and how
-  many km of river would open up if that culvert were fixed.
+  ("vassdrag"), the biologists' comments, diameter, length, priority
+  score, and how many km of river would open up if that culvert were
+  fixed.
 
 ## How it works -- the pipeline
 
@@ -153,19 +158,48 @@ This is what makes "how much space opens up upstream" possible. It:
    nearest line in that network -- since the field GPS coordinate can
    be a little off, we assume the culvert is really wherever the
    closest mapped stream is.
-3. **Walks upstream** through the network graph from that point,
-   collecting every segment that eventually flows into it (handling
-   branches/tributaries correctly, without double-counting), and adds
-   up their length -- this becomes the `oppstrom_lengde_km` figure in
-   each culvert's popup.
-4. **Colours every segment in the whole network**: red if it's
-   upstream of a total barrier, orange if upstream of a partial one
-   (red wins if a segment happens to be upstream of both), blue
-   otherwise. The result is `data/processed/elvenett_farget.geojson`,
-   which step 3 draws in full.
+3. **Walks upstream** through the network graph from that snapped
+   point, collecting every segment that genuinely becomes reachable --
+   handling branches/tributaries correctly, without double-counting --
+   and **stopping the walk on any branch** as soon as it hits:
+   - another **Absolutt** (total) barrier further up that branch --
+     fixing the lower culvert wouldn't matter if fish still can't get
+     past a total blockage above it, or
+   - (only if you pass `--dtm`, see below) a **natural waterfall or
+     rapid**: a drop of more than 2 m within 5 m of river length, which
+     most anadromous fish can't climb regardless of any culvert.
+
+   A **Partiell** (partial) barrier upstream does *not* stop the walk,
+   since fish can still get through it at least some of the time. The
+   resulting length becomes the `oppstrom_lengde_km` figure in each
+   culvert's popup.
+4. **Colours the network accordingly**, splitting each mapped river
+   segment exactly at every barrier point (so the colour never bleeds
+   into the stretch downstream of a barrier just because that happened
+   to share the same underlying map line) -- red upstream of a total
+   barrier, orange upstream of a partial one, blue everywhere else. The
+   result is `data/processed/elvenett_farget.geojson`, which step 3
+   draws in full.
+5. Turns each culvert's (correctly-stopped) upstream length into a
+   **0-100 priority score**, relative to the other barriers processed
+   in the same run: 100 = fixing this one would open up the most
+   habitat of all of them, 0 = the least. This is what step 3 uses to
+   size each dot on the map.
 
 Only "Absolutt" and "Partiell" culverts count as barriers here, since
 those are the only ones with an upstream stretch worth marking.
+
+**Detecting natural waterfalls (optional, needs an elevation raster):**
+pass `--dtm path/to/dtm.tif` pointing at a local "digital terrain
+model" GeoTIFF (e.g. from Kartverket's <https://hoydedata.no/>
+download service) to also stop the upstream walk at natural barriers,
+not just at other culverts. Without `--dtm`, this step is simply
+skipped and only Absolutt culverts stop the walk -- everything else
+still works. The 2 m / 5 m rule of thumb is set as
+`NATURAL_BARRIER_DROP_M` / `NATURAL_BARRIER_WINDOW_M` near the top of
+the script if you want to tune it. (This part of the script was
+validated against a small hand-built test raster with a known 3 m step
+in it, not against a real DTM -- we don't have one for Arendal yet.)
 
 **Where to get the river data:** an NVE map data export
 (`nedlasting.nve.no`) for the kommune you want to cover, as a `.zip`
@@ -230,15 +264,15 @@ time you view it.
 - **Rows without coordinates** (256 of 856) are simply excluded from
   the map, since there is nowhere to plot them; they still exist in the
   original data.
-- **Upstream length/colouring is a simplification.** Step 4 traces and
-  colours the *entire* upstream network from each barrier, without
-  checking whether there's a *second*, further-upstream barrier
-  partway along that stretch. If there is, fixing only the lower
-  culvert wouldn't actually open up everything shown in red/orange
-  above it. Cross-check high-value results against the map before
-  using them for prioritisation -- teaching the script to stop at the
-  next barrier upstream is a reasonable next improvement if this
-  matters for your use case.
+- **Priority scores are relative, not absolute.** The 0-100 score is
+  scaled against the *other barriers processed in the same run* -- if
+  you change the kommune filter or the input data, the same culvert can
+  get a different score. It's meant for comparing barriers to each
+  other within one map, not as a fixed, portable number.
+- **Natural-barrier detection needs an elevation raster you supply**
+  (`--dtm`) -- without one, only other Absolutt culverts stop the
+  upstream walk, so a stretch of river blocked by a natural waterfall
+  higher up (with no culvert involved) would still show as "opened up".
 - **Only covers Arendal right now.** Both the river data and the
   `KOMMUNE_FILTER`/`--kommune` settings are scoped to Arendal. The
   pipeline works the same way for any other kommune once you have a
