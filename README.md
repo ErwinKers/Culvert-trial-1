@@ -47,10 +47,24 @@ It shows:
 - A switchable background map, including a terrain/relief layer
   (OpenTopoMap, the default) that shows contour lines and hillshading,
   so you can see slopes and valleys.
+- *(If you ran step 4 with `--dtm`)* a small triangle icon at every
+  spot the river's slope suggests a **natural** barrier (a waterfall or
+  rapid too steep for fish regardless of any culvert) -- solid purple
+  for a confident flag, pale/outline purple for "worth checking in the
+  field, not certain". A confident natural barrier also stops the
+  upstream-habitat colouring, same as another culvert would.
+- *(If you ran step 5)* two more layers showing real river hydrology
+  instead of just a coloured line:
+  - **River width ribbons**, shaded by average discharge (how much
+    water the stream carries) -- an actual *area*, not just a line,
+    so a major river reads as a wide band and a small brook as a
+    thin one.
+  - **Lakes**, as NVE's own real (not estimated) lake polygons.
 - Click any dot for details: place name, municipality, river/stream
   ("vassdrag"), the biologists' comments, diameter, length, priority
   score, and how many km of river would open up if that culvert were
-  fixed.
+  fixed. Click the river ribbon for its discharge, estimated width, and
+  estimated flow speed.
 
 ## How it works -- the pipeline
 
@@ -64,10 +78,11 @@ scripts/
   02_hent_hoydedata.py          (optional, needs internet) fetch elevation per point
   03_lag_kart.py                build the final interactive map (output/agder_kulvert_kart.html)
   04_koble_til_elvenett.py      (optional, needs NVE river data) snap to river + trace upstream
+  05_hent_elveegenskaper.py     (optional, needs NVE hydrology data) discharge/width/lakes
 ```
 
-Run them in order (0 and 2 and 4 are optional -- 1 then 3 alone already
-gives you a working map).
+Run them in order (0, 2, 4, 5 are optional -- 1 then 3 alone already
+gives you a working map, just without the river network).
 
 ### Step 0 -- (optional) re-export from Excel
 
@@ -166,8 +181,8 @@ This is what makes "how much space opens up upstream" possible. It:
      fixing the lower culvert wouldn't matter if fish still can't get
      past a total blockage above it, or
    - (only if you pass `--dtm`, see below) a **natural waterfall or
-     rapid**: a drop of more than 2 m within 5 m of river length, which
-     most anadromous fish can't climb regardless of any culvert.
+     rapid** -- a stretch steep enough that most anadromous fish
+     couldn't climb it regardless of any culvert.
 
    A **Partiell** (partial) barrier upstream does *not* stop the walk,
    since fish can still get through it at least some of the time. The
@@ -189,28 +204,53 @@ This is what makes "how much space opens up upstream" possible. It:
 Only "Absolutt" and "Partiell" culverts count as barriers here, since
 those are the only ones with an upstream stretch worth marking.
 
-**Detecting natural waterfalls (optional, needs an elevation raster):**
+**Detecting natural barriers (optional, needs an elevation raster):**
 pass `--dtm path/to/dtm.tif` pointing at a local "digital terrain
 model" GeoTIFF (e.g. from Kartverket's <https://hoydedata.no/>
-download service) to also stop the upstream walk at natural barriers,
-not just at other culverts. Without `--dtm`, this step is simply
-skipped and only Absolutt culverts stop the walk -- everything else
-still works. The 2 m / 5 m rule of thumb is set as
-`NATURAL_BARRIER_DROP_M` / `NATURAL_BARRIER_WINDOW_M` near the top of
-the script if you want to tune it. (This part of the script was
-validated against a small hand-built test raster with a known 3 m step
-in it, not against a real DTM -- we don't have one for Arendal yet.)
+download service) to also flag/stop at natural barriers, not just
+other culverts.
+
+The method is a **gradient smoothed over ~100 m of river**, not just
+one segment's own (sometimes short and noisy) slope: for every stretch
+of river, we look at the average slope across roughly 50 m upstream
+and 50 m downstream of it (walking into neighbouring segments as
+needed to gather that much length), and classify it:
+
+| Smoothed gradient | Meaning | Effect |
+|---|---|---|
+| >= 10% (`NATURAL_GRADIENT_CERTAIN`) | Likely a natural barrier | Stops the upstream walk, same as an Absolutt culvert |
+| 7-10% (`NATURAL_GRADIENT_CAUTIOUS`) | Possible natural barrier, uncertain | Flagged on the map (pale triangle icon) but does *not* stop the walk -- a gradient alone in this range isn't reliable enough to automatically discard habitat |
+| < 7% | Not flagged | -- |
+
+Both thresholds and the 100 m window size are constants near the top
+of the script if you want to tune them.
+
+Without `--dtm`, natural-barrier detection is simply skipped and only
+Absolutt culverts stop the walk -- everything else still works.
+
+*(This part of the script was validated against small hand-built test
+rasters with known slopes in them -- 12%, 8%, and 3% steps, correctly
+sorted into "certain"/"cautious"/"not flagged" -- not against a real
+DTM, since we don't have one for Arendal yet.)*
 
 **Where to get the river data:** an NVE map data export
-(`nedlasting.nve.no`) for the kommune you want to cover, as a `.zip`
-containing an `Elv` folder with `Elv_Elvenett.shp`/`.shx`/`.dbf`/`.prj`
-(all four files belong together). Unzip those four files into
-`data/raw/nve_elvenett/` in this project. This project currently ships
-with an Arendal-kommune export already validated end-to-end against the
-real data (883 real stream segments, correct branching, sensible
-upstream lengths) -- the screenshot in this repo's history shows the
-result. For another kommune, get a matching export and update
-`KOMMUNE_FILTER` (`scripts/03_lag_kart.py`) and `--kommune` to match.
+(`nedlasting.nve.no`) for the kommune you want to cover. The `.zip`
+contains several folders under `NVEData/`; this project uses:
+
+| Folder in the export | Goes to | Used by |
+|---|---|---|
+| `Elv/Elv_Elvenett.*` | `data/raw/nve_elvenett/` | step 4 (network + barriers) |
+| `Nedborfelt/Nedborfelt_RegineEnhet.*` | `data/raw/nve_nedborfelt/` | step 5 (discharge) |
+| `Innsjo/Innsjo_Innsjo.*` | `data/raw/nve_innsjo/` | step 5 (lakes) |
+
+(Each is 4-5 files -- `.shp`/`.shx`/`.dbf`/`.prj`/optionally `.cpg` --
+that belong together; unzip all of them, not just the `.shp`.) This
+project currently ships with an Arendal-kommune export already
+validated end-to-end against the real data (883 real stream segments,
+correct branching, sensible upstream lengths, 883/883 matched to a
+REGINE discharge unit). For another kommune, get a matching export and
+update `KOMMUNE_FILTER` (`scripts/03_lag_kart.py`) and `--kommune` to
+match.
 
 **One thing worth a second look:** NVE digitizes Elvenett lines from
 upstream to downstream, and this script relies on that. The Arendal
@@ -223,6 +263,51 @@ more than 100 m from any mapped stream (12 of 44 in the current Arendal
 run) -- those are worth a manual look (either a coordinate error, or
 the culvert is on a stream too small for Elvenett to include).
 
+### Step 5 -- (optional) add discharge, estimated width, and lakes
+
+```bash
+python scripts/05_hent_elveegenskaper.py
+```
+
+This adds real hydrology data and turns the river from "just a line"
+into something closer to an actual water body:
+
+- **Average discharge** ("vannføring", m3/s) -- a genuine NVE number.
+  NVE's REGINE catchment units carry each unit's own local mean annual
+  inflow (`regineQ`, in million m3/year) and the inflow contributed by
+  everything upstream of it (`totTilsig`). Adding those two and
+  converting million-m3-per-year to a mean flow rate gives the
+  discharge past any point:
+
+      Q (m3/s) = (regineQ + totTilsig) x 1,000,000 / (365.25 x 24 x 3600)
+
+  Every river segment carries a REGINE code (`vassdragNr`) that matches
+  one of these catchment units exactly (883/883 did, in the Arendal
+  data), so each segment gets that unit's discharge. One REGINE unit
+  usually covers several individual segments, so this is a
+  step-function approximation along the river, not a smooth increase
+  -- but it's real, sourced data, not a guess.
+- **Estimated width and flow speed.** NVE doesn't publish measured
+  channel width or velocity for every stream in this export (the
+  "Tverrprofil" cross-section data that comes with it measures the
+  whole valley floor for flood modelling, not the water's edge, and
+  only exists at 6 locations in Arendal anyway -- not enough to build a
+  general width layer from). So width and depth are calculated from
+  discharge using standard hydraulic-geometry formulas (width, depth
+  and velocity all scale with a power of discharge -- the classic
+  reference is Leopold & Maddock 1953). These are clearly labelled
+  "estimated" everywhere they appear (`bredde_est_m`, `hastighet_est_ms`
+  in the data) and should be read as "the right order of magnitude",
+  not a survey measurement -- there's no local calibration behind them.
+- **Lakes**, straight from NVE's own `Innsjø` polygons -- these are
+  real, measured area features, not estimated at all.
+
+The river is drawn as a buffered "ribbon" polygon (width = the
+estimated width above) instead of a plain line, coloured by discharge
+on a log scale (a trickle and a major river differ by orders of
+magnitude, so a straight linear colour scale would make everything
+except the biggest river look identical).
+
 ## Setup
 
 ```bash
@@ -230,6 +315,7 @@ pip install -r requirements.txt
 python scripts/01_rens_kulvertdata.py
 python scripts/02_hent_hoydedata.py       # optional, needs internet, can take a while
 python scripts/04_koble_til_elvenett.py --river data/raw/nve_elvenett/Elv_Elvenett.shp --kommune Arendal
+python scripts/05_hent_elveegenskaper.py  # optional, discharge/width/lakes
 python scripts/03_lag_kart.py
 ```
 
@@ -273,17 +359,28 @@ time you view it.
   (`--dtm`) -- without one, only other Absolutt culverts stop the
   upstream walk, so a stretch of river blocked by a natural waterfall
   higher up (with no culvert involved) would still show as "opened up".
-- **Only covers Arendal right now.** Both the river data and the
+- **Estimated width/depth/velocity are not measured.** They come from
+  generic textbook hydraulic-geometry formulas applied to the (real)
+  discharge number, not from any survey of this specific area. Treat
+  them as "roughly this size", especially near the coast where tidal
+  backwater can make the velocity estimate meaningless.
+- **Discharge is a step function along the river**, not a smooth
+  increase -- every segment inside the same REGINE catchment unit gets
+  the same number, since that's the resolution NVE's REGINE data
+  provides.
+- **Only covers Arendal right now.** The river/hydrology data and the
   `KOMMUNE_FILTER`/`--kommune` settings are scoped to Arendal. The
   pipeline works the same way for any other kommune once you have a
-  matching NVE Elvenett export for it.
+  matching NVE export for it.
 
 ## Project layout
 
 ```
-data/raw/                 source data, exported from Excel (small, no photos)
-data/raw/nve_elvenett/    NVE Elvenett river network shapefile for the current kommune (step 4)
-data/processed/           cleaned CSV/GeoJSON + elevation cache + coloured river network (generated by scripts)
-scripts/                  the five pipeline steps, run in order
-output/                   the final map (agder_kulvert_kart.html)
+data/raw/                   source data, exported from Excel (small, no photos)
+data/raw/nve_elvenett/      NVE Elvenett river network shapefile for the current kommune (step 4)
+data/raw/nve_nedborfelt/    NVE REGINE catchment units, for discharge (step 5)
+data/raw/nve_innsjo/        NVE lake polygons (step 5)
+data/processed/             cleaned CSV/GeoJSON + coloured river network + hydrology (generated by scripts)
+scripts/                    the six pipeline steps, run in order
+output/                     the final map (agder_kulvert_kart.html)
 ```

@@ -23,11 +23,9 @@ to the side of the actual stream. So instead we:
        - another "Absolutt" (total) barrier culvert further upstream on
          the same branch -- fixing the lower culvert wouldn't matter if
          there's still a total blockage above it, or
-       - a natural waterfall/rapid: if the ground drops more than
-         NATURAL_BARRIER_DROP_M within NATURAL_BARRIER_WINDOW_M of
-         river length, most fish species can't climb that regardless of
-         any culvert (needs a local elevation raster -- see below; this
-         part is skipped if you don't have one).
+       - a natural waterfall/rapid -- see "Detecting natural barriers"
+         below (needs a local elevation raster; skipped if you don't
+         have one).
      A "Partiell" (partial) barrier upstream does NOT stop the walk,
      since fish can still get through it at least some of the time.
   4. Colour the network based on that: red = upstream of (and not
@@ -59,17 +57,44 @@ point is downstream).
 
     python scripts/04_koble_til_elvenett.py --river data/raw/nve_elvenett/Elv_Elvenett.shp --kommune Arendal
 
-Optional: detecting natural waterfalls/rapids
------------------------------------------------
-Pass --dtm pointing at a local elevation raster (a GeoTIFF "digital
-terrain model", e.g. from Kartverket's https://hoydedata.no/ download
-service) to also detect natural barriers along the river and stop the
-upstream walk there too:
+Detecting natural barriers (optional, needs an elevation raster)
+------------------------------------------------------------------
+Pass --dtm pointing at a local "digital terrain model" GeoTIFF (e.g.
+from Kartverket's https://hoydedata.no/ download service) to also flag
+naturally-impassable stretches of river and stop the upstream walk
+there too:
 
     python scripts/04_koble_til_elvenett.py --river ... --dtm data/raw/dtm/arendal_dtm.tif
 
-Without --dtm, this step is simply skipped (only man-made Absolutt
-barriers stop the walk) -- the rest of the script still works fine.
+The method: for every river segment, we compute the *slope smoothed
+over a 100 m stretch of river* centred on it -- not just the segment's
+own (sometimes very short, noisy) slope, but the average gradient
+across roughly 50 m upstream and 50 m downstream of it too, walking
+into neighbouring segments as needed to gather enough length. A reach
+this steep is a real obstacle to fish regardless of any culvert:
+
+    >= NATURAL_GRADIENT_CERTAIN (10%)   -> "Sannsynlig naturlig hinder"
+                                            (likely a natural barrier;
+                                            this DOES stop the upstream
+                                            walk, like an Absolutt
+                                            culvert)
+    >= NATURAL_GRADIENT_CAUTIOUS (7%)   -> "Mulig naturlig hinder"
+                                            (flagged on the map for you
+                                            to check in the field; does
+                                            NOT stop the walk on its
+                                            own, since a gradient alone
+                                            in this range isn't a
+                                            reliable enough signal to
+                                            automatically discard
+                                            habitat)
+
+Without --dtm, natural-barrier detection is simply skipped (only
+man-made Absolutt barriers stop the walk) -- the rest of the script
+still works fine.
+
+This part of the script has been validated against a small hand-built
+test raster with a known slope in it (see the session notes), not
+against a real DTM -- we don't have one for Arendal yet.
 
 IMPORTANT -- please sanity-check the flow direction once
 ----------------------------------------------------------
@@ -86,7 +111,6 @@ from pathlib import Path
 
 import geopandas as gpd
 import networkx as nx
-import numpy as np
 import pandas as pd
 from shapely.geometry import mapping
 from shapely.ops import substring
@@ -98,6 +122,7 @@ IN_CSV_CANDIDATES = [
 ]
 OUT_CSV = ROOT / "data" / "processed" / "kulvert_punkter_oppstrom.csv"
 OUT_GEOJSON = ROOT / "data" / "processed" / "elvenett_farget.geojson"
+OUT_NATURAL_GEOJSON = ROOT / "data" / "processed" / "naturlige_hindre.geojson"
 
 # A projected, metre-based coordinate system to do the distance/length
 # math in (this matches the CRS NVE delivers Elvenett in).
@@ -113,19 +138,26 @@ NODE_SNAP_TOLERANCE_M = 1.0
 # it (nothing better to do), but flag it so you can review it.
 SUSPICIOUS_SNAP_DISTANCE_M = 100.0
 
-# "Natural barrier" rule of thumb: most anadromous fish can't climb a
-# drop bigger than this within this short a stretch of river.
-NATURAL_BARRIER_DROP_M = 2.0
-NATURAL_BARRIER_WINDOW_M = 5.0
-# How finely to sample the river's elevation profile when looking for
-# such drops (only used when --dtm is given).
-DTM_SAMPLE_SPACING_M = 2.0
+# Natural-barrier screening: gradient smoothed over this many metres of
+# river (roughly half upstream, half downstream of each point), and the
+# two thresholds described in the module docstring above.
+NATURAL_GRADIENT_WINDOW_M = 100.0
+NATURAL_GRADIENT_CERTAIN = 0.10
+NATURAL_GRADIENT_CAUTIOUS = 0.07
 
 BLUE = "#2c7fb8"
 BARRIER_COLORS = {"Absolutt": "#d7191c", "Partiell": "#fdae61"}
 BARRIER_PRIORITY = {"Absolutt": 2, "Partiell": 1}
 
 REVERSE_FLOW_DIRECTION = False  # see the note above
+
+
+def clean_text(value):
+    """Turn pandas' float('nan') for a missing text field into a real
+    None, so it doesn't end up serialized as the literal text 'nan'."""
+    if value is None or (isinstance(value, float) and value != value):
+        return None
+    return value
 
 
 def node_key(coord):
@@ -149,45 +181,119 @@ def build_graph(rivers):
     return G, edge_geom
 
 
-def find_natural_barriers(edge_geom, dtm_path):
-    """Sample each river line's elevation profile from a local raster
-    and flag the point where the steepest short drop happens, if it
-    exceeds our fish-passable threshold. Returns {edge_idx: distance
-    along the edge (from its upstream end) of the barrier}, keeping
-    only the most-downstream such point per edge (the first one a fish
-    swimming upstream would actually meet)."""
+def _walk_distance(G, edge_geom, start_edge, start_dist, target_distance, direction):
+    """From the point `start_dist` metres along `start_edge` (measured
+    from its upstream end), walk `target_distance` metres further
+    upstream ('up') or downstream ('down'), following the longest edge
+    at any junction (a simple stand-in for "the main channel"). Returns
+    (landing_point, distance_actually_covered) -- covered may be less
+    than target_distance if the network runs out first."""
+    remaining = target_distance
+    covered = 0.0
+    edge_idx, dist = start_edge, start_dist
+    while remaining > 1e-6:
+        geom = edge_geom[edge_idx]
+        if direction == "up":
+            available = dist
+            if available >= remaining:
+                return geom.interpolate(dist - remaining), covered + remaining
+            covered += available
+            remaining -= available
+            node = node_key(list(geom.coords)[0])
+            candidates = [
+                (G.get_edge_data(p, node)["idx"], G.get_edge_data(p, node)["length"]) for p in G.predecessors(node)
+            ]
+            if not candidates:
+                return geom.interpolate(0.0), covered
+            edge_idx, _ = max(candidates, key=lambda c: c[1])
+            dist = edge_geom[edge_idx].length  # enter the new edge at its downstream end
+        else:
+            available = geom.length - dist
+            if available >= remaining:
+                return geom.interpolate(dist + remaining), covered + remaining
+            covered += available
+            remaining -= available
+            node = node_key(list(geom.coords)[-1])
+            candidates = [
+                (G.get_edge_data(node, s)["idx"], G.get_edge_data(node, s)["length"]) for s in G.successors(node)
+            ]
+            if not candidates:
+                return geom.interpolate(geom.length), covered
+            edge_idx, _ = max(candidates, key=lambda c: c[1])
+            dist = 0.0  # enter the new edge at its upstream end
+    return edge_geom[edge_idx].interpolate(dist), covered
+
+
+def find_natural_barrier_candidates(G, edge_geom, dtm_path):
+    """For every edge, the gradient (fraction, positive = downhill
+    going downstream) smoothed over NATURAL_GRADIENT_WINDOW_M of river
+    centred on the edge's midpoint. For edges already longer than the
+    window, this stays entirely within the edge; for shorter edges, it
+    walks into neighbouring edges just far enough to make up the
+    difference -- never diluting a short, genuinely steep edge by
+    tacking on extra length it doesn't need. Returns
+    {edge_idx: gradient}."""
     import rasterio
 
-    natural_cut_by_edge = {}
+    half_window = NATURAL_GRADIENT_WINDOW_M / 2
+    gradients = {}
     with rasterio.open(dtm_path) as src:
-        raster_bounds = src.bounds
-        for idx, geom in edge_geom.items():
-            length = geom.length
-            if length < DTM_SAMPLE_SPACING_M:
-                continue
-            n_samples = max(2, int(length // DTM_SAMPLE_SPACING_M) + 1)
-            dists = np.linspace(0, length, n_samples)
-            coords = [(p.x, p.y) for p in (geom.interpolate(d) for d in dists)]
-            if not (raster_bounds.left <= coords[0][0] <= raster_bounds.right):
-                continue  # this edge is outside the DTM's coverage
-            elevs = np.array([v[0] for v in src.sample(coords)], dtype=float)
+        bounds = src.bounds
 
-            worst_dist = None
-            for i in range(n_samples):
-                j = i
-                while j + 1 < n_samples and dists[j + 1] - dists[i] <= NATURAL_BARRIER_WINDOW_M:
-                    j += 1
-                if j == i:
-                    continue
-                drop = elevs[i] - elevs[j]  # positive = elevation falls going downstream
-                if drop >= NATURAL_BARRIER_DROP_M:
-                    # Keep the most-downstream (largest-distance) barrier
-                    # start point found on this edge.
-                    if worst_dist is None or dists[i] > worst_dist:
-                        worst_dist = dists[i]
-            if worst_dist is not None:
-                natural_cut_by_edge[idx] = worst_dist
-    return natural_cut_by_edge
+        def elevation_at(point):
+            if not (bounds.left <= point.x <= bounds.right and bounds.bottom <= point.y <= bounds.top):
+                return None
+            return next(src.sample([(point.x, point.y)]))[0]
+
+        for idx, geom in edge_geom.items():
+            mid_dist = geom.length / 2
+            up_point, up_covered = _walk_distance(G, edge_geom, idx, mid_dist, half_window, "up")
+            down_point, down_covered = _walk_distance(G, edge_geom, idx, mid_dist, half_window, "down")
+            z_up, z_down = elevation_at(up_point), elevation_at(down_point)
+            total_len = up_covered + down_covered
+            if z_up is None or z_down is None or total_len <= 1e-6:
+                continue
+            gradients[idx] = (z_up - z_down) / total_len
+    return gradients
+
+
+def classify_natural_barriers(gradients, edge_geom, rivers, name_col):
+    """Split gradient candidates into the two confidence tiers, and
+    return (natural_cut_by_edge, natural_barrier_features):
+      - natural_cut_by_edge: {edge_idx: cutoff_m} for the CERTAIN tier
+        only -- these act as hard stops in the upstream walk, cut at
+        the edge's midpoint (our best estimate of where the steep
+        stretch actually is, given we only computed one smoothed
+        gradient value per edge, not a fine-grained profile).
+      - natural_barrier_features: point features (both tiers) for the
+        map to draw an icon at, at each flagged edge's midpoint.
+    """
+    natural_cut_by_edge = {}
+    features = []
+    for idx, grad in gradients.items():
+        if grad >= NATURAL_GRADIENT_CERTAIN:
+            tier = "sikker"
+        elif grad >= NATURAL_GRADIENT_CAUTIOUS:
+            tier = "mulig"
+        else:
+            continue
+        geom = edge_geom[idx]
+        if tier == "sikker":
+            natural_cut_by_edge[idx] = geom.length * 0.5
+        midpoint = geom.interpolate(0.5, normalized=True)
+        midpoint_wgs84 = gpd.GeoSeries([midpoint], crs=WORK_CRS).to_crs("EPSG:4326").iloc[0]
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": mapping(midpoint_wgs84),
+                "properties": {
+                    "tier": tier,
+                    "gradient_pct": round(grad * 100, 1),
+                    "elvenavn": clean_text(rivers.iloc[idx][name_col] if name_col else None),
+                },
+            }
+        )
+    return natural_cut_by_edge, features
 
 
 def resolve_edge_coloring(length, intervals):
@@ -234,7 +340,7 @@ def main():
     parser.add_argument(
         "--dtm",
         default=None,
-        help="Optional path to a local elevation raster (GeoTIFF) to detect natural waterfalls/rapids",
+        help="Optional path to a local elevation raster (GeoTIFF) to detect natural barriers",
     )
     args = parser.parse_args()
 
@@ -262,6 +368,7 @@ def main():
     rivers = rivers.explode(index_parts=False).reset_index(drop=True)
     rivers = rivers[rivers.geometry.length > 0].reset_index(drop=True)
     print(f"  {len(rivers)} river line segments")
+    name_col = "elvenavn" if "elvenavn" in rivers.columns else None
 
     print(f"Reading {culvert_csv} ...")
     all_culverts = pd.read_csv(culvert_csv)
@@ -290,11 +397,18 @@ def main():
 
     natural_cut_by_edge = {}
     if args.dtm:
-        print(f"Sampling elevation from {args.dtm} to look for natural barriers ...")
-        natural_cut_by_edge = find_natural_barriers(edge_geom, args.dtm)
-        print(f"  found {len(natural_cut_by_edge)} natural-barrier candidate(s)")
+        print(f"Sampling elevation from {args.dtm} to screen for natural barriers ...")
+        gradients = find_natural_barrier_candidates(G, edge_geom, args.dtm)
+        natural_cut_by_edge, natural_features = classify_natural_barriers(gradients, edge_geom, rivers, name_col)
+        n_certain = sum(1 for f in natural_features if f["properties"]["tier"] == "sikker")
+        n_cautious = len(natural_features) - n_certain
+        print(f"  {n_certain} likely natural barrier(s) (>= {NATURAL_GRADIENT_CERTAIN:.0%}, stops the upstream walk)")
+        print(f"  {n_cautious} possible natural barrier(s) (>= {NATURAL_GRADIENT_CAUTIOUS:.0%}, flagged only)")
+        with open(OUT_NATURAL_GEOJSON, "w", encoding="utf-8") as f:
+            json.dump({"type": "FeatureCollection", "features": natural_features}, f, ensure_ascii=False, default=str)
+        print(f"  saved {OUT_NATURAL_GEOJSON}")
     else:
-        print("No --dtm given -- skipping natural-barrier detection (only man-made")
+        print("No --dtm given -- skipping natural-barrier screening (only man-made")
         print("Absolutt barriers will stop the upstream walk).")
 
     # Snap position (edge + distance-from-upstream-end) for every
@@ -320,7 +434,7 @@ def main():
 
     def trace_upstream(source_i):
         """Walk upstream from culvert source_i, stopping at any other
-        Absolutt barrier or natural barrier. Returns a list of
+        Absolutt barrier or likely natural barrier. Returns a list of
         (edge_idx, start_m, end_m) pieces that remain reachable, and
         their total length in metres."""
         pieces = []
@@ -393,7 +507,6 @@ def main():
     print(f"Saved {OUT_CSV}")
 
     print("Building the coloured river network for the map ...")
-    name_col = "elvenavn" if "elvenavn" in rivers.columns else None
     features = []
     n_red = n_orange = n_blue = 0
     for idx, geom in edge_geom.items():
@@ -408,7 +521,7 @@ def main():
                     "geometry": mapping(piece_wgs84),
                     "properties": {
                         "farge": color,
-                        "elvenavn": (rivers.iloc[idx][name_col] if name_col else None),
+                        "elvenavn": clean_text(rivers.iloc[idx][name_col] if name_col else None),
                     },
                 }
             )
