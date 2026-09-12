@@ -145,6 +145,8 @@ def build_popup_html(row, has_height, has_snap, has_feltdata):
     def field(label, value, unit=""):
         if pd.isna(value) or str(value).strip() in ("", "nan"):
             return ""
+        if isinstance(value, float):
+            value = round(value, 2)
         return f"<b>{label}:</b> {value}{unit}<br>"
 
     html = "<div style='font-size: 13px; max-width: 260px'>"
