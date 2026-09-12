@@ -3,3 +3,7 @@ openpyxl
 pyproj
 folium
 requests
+geopandas
+pyogrio
+shapely
+networkx

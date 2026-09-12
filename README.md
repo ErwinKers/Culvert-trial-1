@@ -13,26 +13,28 @@ plus free public map/terrain data.
 
 An HTML file (`output/agder_kulvert_kart.html`) you can open directly
 in a web browser (double-click it) -- no server, no login, nothing to
-install to just *view* it. It shows:
+install to just *view* it. The map only shows culverts that are
+actually migration barriers -- everything else is left out on purpose.
+It shows:
 
-- One dot per culvert, coloured by migration-barrier severity:
+- One dot per barrier culvert:
   | Colour | Category | Meaning |
   |---|---|---|
   | 🔴 red | Absolutt | Total barrier -- fish cannot pass |
   | 🟠 orange | Partiell | Partial barrier -- passable under some conditions/for some fish |
-  | 🟣 purple | Nedstrøms hinder | Barrier only in the downstream direction |
-  | 🟢 green | Ikke hinder | Not a barrier, fish pass freely |
-  | 🔵 blue | Neppe fiskeførende | Stream probably doesn't hold fish anyway |
-  | ⚪ gray | Ikke angitt | Not assessed / missing data |
 - A switchable background map, including a terrain/relief layer
   (OpenTopoMap) that shows contour lines and hillshading, so you can
   see slopes and valleys, plus streams and rivers.
-- A line from each culvert's downstream point to its upstream point,
-  and (optionally) the elevation difference between the two, since a
-  culvert with a big drop in height behaves like a small waterfall for
-  fish trying to swim up through it.
+- *(If you ran step 4)* each dot is snapped onto the nearest mapped
+  stream from NVE's official river network data, instead of the raw
+  (slightly imprecise) field coordinate -- and the stretch of that
+  stream network **upstream** of the barrier is drawn in the same red
+  or orange colour, with its length in km shown in the popup. That's
+  the amount of habitat that would open up for salmon/sea trout if that
+  particular culvert were fixed.
 - Click any dot for details: place name, municipality, river/stream
-  ("vassdrag"), the biologists' comments, diameter, length, etc.
+  ("vassdrag"), the biologists' comments, diameter, length, upstream
+  length unlocked, etc.
 
 ## How it works -- the pipeline
 
@@ -41,11 +43,15 @@ thing, so it's easier to follow (and re-run just the part you need):
 
 ```
 scripts/
-  00_eksporter_fra_excel.py   (optional) refresh data/raw/*.csv from a new Excel file
-  01_rens_kulvertdata.py      clean coordinates + classify barriers
-  02_hent_hoydedata.py        (optional, needs internet) fetch elevation per point
-  03_lag_kart.py              build the final interactive map (output/agder_kulvert_kart.html)
+  00_eksporter_fra_excel.py     (optional) refresh data/raw/*.csv from a new Excel file
+  01_rens_kulvertdata.py        clean coordinates + classify barriers
+  02_hent_hoydedata.py          (optional, needs internet) fetch elevation per point
+  03_lag_kart.py                build the final interactive map (output/agder_kulvert_kart.html)
+  04_koble_til_elvenett.py      (optional, needs NVE river data) snap to river + trace upstream
 ```
+
+Run them in order (0 and 2 and 4 are optional -- 1 then 3 alone already
+gives you a working map).
 
 ### Step 0 -- (optional) re-export from Excel
 
@@ -115,15 +121,67 @@ substitute for the biologists' field assessment.
 python scripts/03_lag_kart.py
 ```
 
-Reads whichever processed file exists (with or without elevation) and
-writes `output/agder_kulvert_kart.html`. Open that file in your browser.
+Reads whichever processed file exists (plain, with elevation, or with
+the river network from step 4) and writes
+`output/agder_kulvert_kart.html`. Open that file in your browser.
+
+### Step 4 -- (optional) snap to the real river network + trace upstream
+
+```bash
+python scripts/04_koble_til_elvenett.py --river data/raw/nve_elvenett/Elv_Elvenett.shp
+```
+
+This is what makes "how much space opens up upstream" possible. It:
+
+1. Loads NVE's **Elvenett** river network data -- real line-by-line
+   geometry for every mapped stream, built as a proper network where
+   streams connect exactly at confluences. That's different from the
+   OpenTopoMap background picture in step 3, which just *looks like*
+   rivers but isn't data we can compute with.
+2. **Snaps** each barrier culvert onto the nearest line in that
+   network -- since the field GPS coordinate can be a little off, we
+   assume the culvert is really wherever the closest mapped stream is.
+3. **Walks upstream** through the network graph from that point,
+   collecting every segment that eventually flows into it (handling
+   branches/tributaries correctly, without double-counting), and adds
+   up their length.
+
+Only "Absolutt" and "Partiell" culverts are processed, since those are
+the only ones with an upstream stretch worth calculating.
+
+**Where to get the river data:** this project's river data comes from
+an NVE map data export (`nedlasting.nve.no`), shared as a Google Drive
+folder. Google Drive's file-transfer size limit meant this development
+session could only pull small sample files (under ~1-2 MB) through
+that connector -- not the full `Elv_Elvenett.shp`/`.dbf` (55 MB / 41 MB
+for Agder), so **this script has been validated against a small,
+hand-built synthetic river network with the same structure as NVE's
+real data (confirmed against NVE's actual schema/format), not against
+the real Elvenett file itself.** To use it for real:
+
+1. From the shared Drive folder, download the `Elv` subfolder
+   (`Elv_Elvenett.shp`, `.shx`, `.dbf`, `.prj` -- all four files, they
+   belong together) to `data/raw/nve_elvenett/` in this project.
+2. Run the command above.
+3. **Sanity-check the result once** before trusting it: NVE digitizes
+   Elvenett lines from upstream to downstream, and this script relies
+   on that. Open `data/processed/oppstroms_elvenett.geojson` in QGIS
+   (or eyeball it on the generated map) for a river you know well, and
+   confirm the highlighted "upstream" stretch is actually upstream, not
+   downstream. If it's backwards, set `REVERSE_FLOW_DIRECTION = True`
+   near the top of the script and re-run.
+4. Also check the console output for how many culverts snapped more
+   than 100 m from any mapped stream -- those are worth a manual look
+   (either a coordinate error, or the culvert is on a stream too small
+   for Elvenett to include).
 
 ## Setup
 
 ```bash
 pip install -r requirements.txt
 python scripts/01_rens_kulvertdata.py
-python scripts/02_hent_hoydedata.py   # optional, needs internet, can take a while
+python scripts/02_hent_hoydedata.py       # optional, needs internet, can take a while
+python scripts/04_koble_til_elvenett.py   # optional, needs the NVE river data (see step 4 above)
 python scripts/03_lag_kart.py
 ```
 
@@ -157,12 +215,21 @@ time you view it.
 - **Rows without coordinates** (256 of 856) are simply excluded from
   the map, since there is nowhere to plot them; they still exist in the
   original data.
+- **Upstream length is a simplification.** Step 4 traces the *entire*
+  upstream network from each barrier, without checking whether there's
+  a *second*, further-upstream barrier partway along that stretch. If
+  there is, fixing only the lower culvert wouldn't actually open up
+  everything above it. Cross-check high-value results against the map
+  before using them for prioritisation -- teaching the script to stop
+  at the next barrier upstream is a reasonable next improvement if this
+  matters for your use case.
 
 ## Project layout
 
 ```
-data/raw/            source data, exported from Excel (small, no photos)
-data/processed/      cleaned CSV/GeoJSON + elevation cache (generated by scripts)
-scripts/             the four pipeline steps, run in order
-output/              the final map (agder_kulvert_kart.html)
+data/raw/                 source data, exported from Excel (small, no photos)
+data/raw/nve_elvenett/    NVE Elvenett river network shapefile (you add this, step 4)
+data/processed/           cleaned CSV/GeoJSON + elevation cache + river network (generated by scripts)
+scripts/                  the five pipeline steps, run in order
+output/                   the final map (agder_kulvert_kart.html)
 ```

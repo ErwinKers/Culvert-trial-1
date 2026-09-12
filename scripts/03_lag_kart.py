@@ -3,6 +3,11 @@ Step 3: build the actual interactive map, and save it as a single HTML
 file you can open in any web browser (double-click it, no installation
 needed to VIEW it -- only to build it).
 
+This map only shows culverts that are actually a problem for fish
+migration: "Absolutt" (total barrier) and "Partiell" (partial barrier).
+The other categories (not a barrier, not assessed, etc.) aren't
+relevant to this map's purpose, so they're left out entirely.
+
 What ends up on the map
 ------------------------
 * Background ("base") map you can switch between:
@@ -17,15 +22,16 @@ What ends up on the map
   in your browser, whenever you have internet access and open the map --
   this script does not need internet to build the file.
 
-* One dot per culvert, at the downstream point, coloured by the
-  migration-barrier category we worked out in step 1 (red = total
-  barrier, orange = partial, green = not a barrier, etc.). Click a dot
-  to see the details (place name, river, comments, ...).
+* One dot per barrier culvert, coloured red (total barrier) or orange
+  (partial barrier). If you ran step 4 (river network linking), the dot
+  sits at the point snapped onto the nearest mapped stream, which is
+  more reliable than the raw field coordinate; click a dot to see both
+  the snapped and original position, and how far apart they are.
 
-* A thin line from the downstream point to the upstream point of each
-  culvert, so you can see exactly where the crossing is; if you ran
-  step 2 (height data), this line's thickness reflects the elevation
-  drop between the two points.
+* If you ran step 4: the stretch of river/stream network upstream of
+  each barrier, coloured the same way (red/orange), so you can see --
+  and, from the popup, read off in km -- how much habitat would open
+  up if that particular culvert were fixed.
 
 * A legend explaining the colours, and a layer switcher (top right) so
   you can turn categories or background maps on/off.
@@ -35,38 +41,64 @@ Usage
     python scripts/03_lag_kart.py
 """
 
+import json
 from pathlib import Path
 
 import folium
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parent.parent
-IN_CSV_WITH_HEIGHT = ROOT / "data" / "processed" / "kulvert_punkter_med_hoyde.csv"
-IN_CSV_BASE = ROOT / "data" / "processed" / "kulvert_punkter.csv"
+IN_CSV_CANDIDATES = [
+    ROOT / "data" / "processed" / "kulvert_punkter_oppstrom.csv",
+    ROOT / "data" / "processed" / "kulvert_punkter_med_hoyde.csv",
+    ROOT / "data" / "processed" / "kulvert_punkter.csv",
+]
+IN_GEOJSON_UPSTREAM = ROOT / "data" / "processed" / "oppstroms_elvenett.geojson"
 OUT_HTML = ROOT / "output" / "agder_kulvert_kart.html"
 
-# Same colours/labels as in step 1 -- kept here too so this script can
-# also be read and understood on its own.
-BARRIER_ORDER = [
-    "Absolutt",
-    "Partiell",
-    "Nedstrøms hinder",
-    "Ikke hinder",
-    "Neppe fiskeførende",
-    "Ikke angitt",
-]
+# Only these two categories are actual migration barriers -- the rest
+# ("Ikke hinder", "Ikke angitt", ...) are left off this map on purpose.
+BARRIER_ORDER = ["Absolutt", "Partiell"]
+BARRIER_LABELS = {
+    "Absolutt": "Totalt vandringshinder",
+    "Partiell": "Delvis vandringshinder",
+}
+BARRIER_COLORS = {"Absolutt": "#d7191c", "Partiell": "#fdae61"}
 
 
 def load_data():
-    if IN_CSV_WITH_HEIGHT.exists():
-        print(f"Using data with elevation: {IN_CSV_WITH_HEIGHT}")
-        return pd.read_csv(IN_CSV_WITH_HEIGHT)
-    print(f"No elevation data found, using: {IN_CSV_BASE}")
-    print("(run scripts/02_hent_hoydedata.py first if you want height info)")
-    return pd.read_csv(IN_CSV_BASE)
+    for path in IN_CSV_CANDIDATES:
+        if path.exists():
+            print(f"Using {path}")
+            df = pd.read_csv(path)
+            break
+    else:
+        raise SystemExit("Run scripts/01_rens_kulvertdata.py first.")
+
+    if path.name != "kulvert_punkter_oppstrom.csv":
+        print("(run scripts/04_koble_til_elvenett.py to snap culverts onto the")
+        print(" real river network and see how much habitat opens up upstream)")
+
+    before = len(df)
+    df = df[df["barrier_category"].isin(BARRIER_ORDER)].copy()
+    print(f"Showing {len(df)} of {before} culverts (Absolutt/Partiell only)")
+    return df
 
 
-def build_popup_html(row, has_height):
+def load_upstream_geojson():
+    if not IN_GEOJSON_UPSTREAM.exists():
+        return None
+    with open(IN_GEOJSON_UPSTREAM, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def marker_position(row, has_snap):
+    if has_snap and pd.notna(row.get("lat_snappet")) and pd.notna(row.get("lon_snappet")):
+        return row["lat_snappet"], row["lon_snappet"]
+    return row["lat_ned"], row["lon_ned"]
+
+
+def build_popup_html(row, has_height, has_snap):
     def field(label, value, unit=""):
         if pd.isna(value) or str(value).strip() in ("", "nan"):
             return ""
@@ -87,6 +119,10 @@ def build_popup_html(row, has_height):
         html += field("Høyde nedstrøms", row.get("elevation_ned_m"), " moh")
         html += field("Høyde oppstrøms", row.get("elevation_opp_m"), " moh")
         html += field("Høydeforskjell", row.get("elevation_diff_m"), " m")
+    if has_snap:
+        html += "<hr style='margin:4px 0'>"
+        html += field("Oppstrøms elvestrekning som åpnes", row.get("oppstrom_lengde_km"), " km")
+        html += field("Avstand kartlagt punkt -> elvenett", row.get("snap_avstand_m"), " m")
     html += field("Kommentar", row.get("kommentar"))
     html += "</div>"
     return html
@@ -150,31 +186,23 @@ def add_base_layers(m):
     ).add_to(m)
 
 
-def add_legend(m):
+def add_legend(m, has_upstream):
     rows = ""
-    colors = {
-        "Absolutt": "#d7191c",
-        "Partiell": "#fdae61",
-        "Nedstrøms hinder": "#984ea3",
-        "Ikke hinder": "#1a9641",
-        "Neppe fiskeførende": "#2c7fb8",
-        "Ikke angitt": "#999999",
-    }
-    labels = {
-        "Absolutt": "Totalt vandringshinder",
-        "Partiell": "Delvis vandringshinder",
-        "Nedstrøms hinder": "Hinder kun nedstrøms",
-        "Ikke hinder": "Ikke et vandringshinder",
-        "Neppe fiskeførende": "Neppe fiskeførende bekk",
-        "Ikke angitt": "Ikke vurdert",
-    }
     for cat in BARRIER_ORDER:
         rows += (
             f"<div style='margin:2px 0'>"
             f"<span style='display:inline-block;width:12px;height:12px;"
-            f"border-radius:50%;background:{colors[cat]};margin-right:6px'></span>"
-            f"{labels[cat]}</div>"
+            f"border-radius:50%;background:{BARRIER_COLORS[cat]};margin-right:6px'></span>"
+            f"{BARRIER_LABELS[cat]} (kulvert)</div>"
         )
+    if has_upstream:
+        for cat in BARRIER_ORDER:
+            rows += (
+                f"<div style='margin:2px 0'>"
+                f"<span style='display:inline-block;width:16px;height:3px;"
+                f"background:{BARRIER_COLORS[cat]};margin-right:6px;vertical-align:middle'></span>"
+                f"Elv/bekk oppstrøms {BARRIER_LABELS[cat].lower()}</div>"
+            )
 
     legend_html = f"""
     <div style="
@@ -188,56 +216,78 @@ def add_legend(m):
     m.get_root().html.add_child(folium.Element(legend_html))
 
 
+def add_upstream_layers(m, geojson):
+    """One FeatureGroup per barrier category, so the red/orange upstream
+    river stretches can be toggled independently of the culvert dots."""
+    groups = {
+        cat: folium.FeatureGroup(name=f"Elvenett oppstrøms: {BARRIER_LABELS[cat]}")
+        for cat in BARRIER_ORDER
+    }
+    for feature in geojson["features"]:
+        cat = feature["properties"].get("kategori")
+        group = groups.get(cat)
+        if group is None:
+            continue
+        folium.GeoJson(
+            feature,
+            style_function=lambda _f, color=feature["properties"]["farge"]: {
+                "color": color,
+                "weight": 4,
+                "opacity": 0.85,
+            },
+        ).add_to(group)
+    for group in groups.values():
+        group.add_to(m)
+
+
 def main():
     df = load_data()
     has_height = "elevation_diff_m" in df.columns
+    has_snap = "lat_snappet" in df.columns
+    upstream_geojson = load_upstream_geojson()
 
-    center_lat = df["lat_ned"].mean()
-    center_lon = df["lon_ned"].mean()
+    positions = df.apply(lambda r: marker_position(r, has_snap), axis=1, result_type="expand")
+    df["_map_lat"], df["_map_lon"] = positions[0], positions[1]
+
+    center_lat = df["_map_lat"].mean()
+    center_lon = df["_map_lon"].mean()
 
     m = folium.Map(location=[center_lat, center_lon], zoom_start=9, tiles=None)
     add_base_layers(m)
 
-    # One layer (FeatureGroup) per barrier category, so each can be
-    # switched on/off independently in the layer control.
-    groups = {cat: folium.FeatureGroup(name=f"Kulverter: {cat}") for cat in BARRIER_ORDER}
-    line_group = folium.FeatureGroup(name="Linje nedstrøms->oppstrøms", show=False)
+    if upstream_geojson is not None:
+        add_upstream_layers(m, upstream_geojson)
+    else:
+        print("(no data/processed/oppstroms_elvenett.geojson found -- run")
+        print(" scripts/04_koble_til_elvenett.py to add the upstream river layers)")
+
+    groups = {cat: folium.FeatureGroup(name=f"Kulverter: {BARRIER_LABELS[cat]}") for cat in BARRIER_ORDER}
 
     for _, row in df.iterrows():
-        cat = row.get("barrier_category", "Ikke angitt")
-        group = groups.get(cat, groups["Ikke angitt"])
+        cat = row.get("barrier_category")
+        group = groups.get(cat)
+        if group is None:
+            continue
 
         folium.CircleMarker(
-            location=[row["lat_ned"], row["lon_ned"]],
+            location=[row["_map_lat"], row["_map_lon"]],
             radius=marker_radius(row, has_height),
-            color=row.get("barrier_color", "#999999"),
+            color=BARRIER_COLORS[cat],
             fill=True,
-            fill_color=row.get("barrier_color", "#999999"),
-            fill_opacity=0.85,
+            fill_color=BARRIER_COLORS[cat],
+            fill_opacity=0.9,
             weight=1,
-            popup=folium.Popup(build_popup_html(row, has_height), max_width=300),
+            popup=folium.Popup(build_popup_html(row, has_height, has_snap), max_width=300),
         ).add_to(group)
-
-        if pd.notna(row.get("lat_opp")) and pd.notna(row.get("lon_opp")):
-            folium.PolyLine(
-                locations=[
-                    [row["lat_ned"], row["lon_ned"]],
-                    [row["lat_opp"], row["lon_opp"]],
-                ],
-                color=row.get("barrier_color", "#999999"),
-                weight=2,
-                opacity=0.7,
-            ).add_to(line_group)
 
     for group in groups.values():
         group.add_to(m)
-    line_group.add_to(m)
 
-    add_legend(m)
+    add_legend(m, upstream_geojson is not None)
     folium.LayerControl(collapsed=False).add_to(m)
 
     # Zoom to fit all the points instead of a fixed zoom level.
-    bounds = [[df["lat_ned"].min(), df["lon_ned"].min()], [df["lat_ned"].max(), df["lon_ned"].max()]]
+    bounds = [[df["_map_lat"].min(), df["_map_lon"].min()], [df["_map_lat"].max(), df["_map_lon"].max()]]
     m.fit_bounds(bounds)
 
     OUT_HTML.parent.mkdir(parents=True, exist_ok=True)
