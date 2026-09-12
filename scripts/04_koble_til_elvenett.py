@@ -1,6 +1,6 @@
 """
-Step 4: snap each culvert onto the real river network, and trace how
-much of the river/stream network lies UPSTREAM of it.
+Step 4: snap each culvert onto the real river network, and colour the
+WHOLE stream network by whether it lies upstream of a migration barrier.
 
 Why we need this
 -----------------
@@ -22,12 +22,27 @@ to the side of the actual stream. So instead we:
      point, collecting every stream segment that eventually flows
      into it. That is the stretch of river that would become
      reachable for salmon/sea trout again if this culvert were fixed.
-  4. Add up the length of all those segments (in km) as a simple,
-     concrete number for "how much habitat opens up".
+  4. Colour the ENTIRE river network based on that: a segment is
+        - red    if it's upstream of an "Absolutt" (total) barrier,
+        - orange if it's upstream of a "Partiell" (partial) barrier
+          (and not already red because of a worse barrier downstream
+          of it on the same branch),
+        - blue   otherwise -- either it's not affected by any barrier
+          at all, or it's downstream of the blocking culvert (fish can
+          still reach it fine; the barrier only stops upward passage).
+  5. Also add up the upstream length (in km) per culvert, as a simple,
+     concrete number for "how much habitat opens up if this one is
+     fixed".
 
 Only culverts assessed as "Absolutt" (total barrier) or "Partiell"
-(partial barrier) are processed -- the rest aren't barriers, so there's
-no upstream stretch to "unlock".
+(partial barrier) count as barriers here -- the rest aren't barriers,
+so there's no upstream stretch to mark.
+
+This script only processes ONE municipality (kommune) at a time --
+--kommune, default "Arendal" -- both because that's usually what a
+river-network export from NVE actually covers, and because there is no
+point snapping a culvert in one kommune onto a river network file that
+doesn't include that area.
 
 Where the river data comes from
 --------------------------------
@@ -37,32 +52,29 @@ features, and lines are digitized in the direction of flow (the first
 point of a line is upstream, the last point is downstream). That's
 exactly the structure we need to walk the network programmatically.
 
-This script expects the Elvenett shapefile locally, e.g. downloaded
-from NVE's map data service (nedlasting.nve.no) or from wherever your
-organisation already has it (see the note at the end about where this
-project got its copy). Point --river at the .shp file:
+Point --river at the .shp file:
 
-    python scripts/04_koble_til_elvenett.py --river data/raw/nve_elvenett/Elv_Elvenett.shp
+    python scripts/04_koble_til_elvenett.py --river data/raw/nve_elvenett/Elv_Elvenett.shp --kommune Arendal
 
 IMPORTANT -- please sanity-check the flow direction once
 ----------------------------------------------------------
 This script assumes NVE's Elvenett lines are digitized from upstream to
-downstream (their documented convention). We could not verify this
-against the live data ourselves. Before trusting the results, do a
-quick manual check: pick a river you know well (e.g. one that clearly
-flows from inland mountains down to the coast), open the cleaned output
-in QGIS or similar, and confirm that for a line segment on it, the
-first coordinate is the more-inland/upstream end. If it turns out to be
-reversed, flip the REVERSE_FLOW_DIRECTION flag below and re-run.
+downstream (their documented convention). Before trusting the results,
+do a quick manual check: pick a river you know well (e.g. one that
+clearly flows from inland down to the coast) on the generated map, and
+confirm the highlighted "upstream" stretch is actually upstream of the
+barrier, not downstream. If it's backwards, flip REVERSE_FLOW_DIRECTION
+below and re-run.
 """
 
 import argparse
+import json
 from pathlib import Path
 
 import geopandas as gpd
 import networkx as nx
 import pandas as pd
-from shapely.geometry import Point, mapping
+from shapely.geometry import mapping
 from shapely.ops import substring
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -71,12 +83,10 @@ IN_CSV_CANDIDATES = [
     ROOT / "data" / "processed" / "kulvert_punkter.csv",
 ]
 OUT_CSV = ROOT / "data" / "processed" / "kulvert_punkter_oppstrom.csv"
-OUT_GEOJSON = ROOT / "data" / "processed" / "oppstroms_elvenett.geojson"
+OUT_GEOJSON = ROOT / "data" / "processed" / "elvenett_farget.geojson"
 
 # A projected, metre-based coordinate system to do the distance/length
-# math in (NVE's own data is delivered in this system, or the very
-# close ETRS89 equivalent EPSG:25832 -- close enough here that mixing
-# them causes no meaningful error at this scale).
+# math in (this matches the CRS NVE delivers Elvenett in).
 WORK_CRS = "EPSG:32632"
 
 # Two points closer than this (in the graph-node sense) are treated as
@@ -90,7 +100,11 @@ NODE_SNAP_TOLERANCE_M = 1.0
 # it (nothing better to do), but flag it clearly so you can review it.
 SUSPICIOUS_SNAP_DISTANCE_M = 100.0
 
+BLUE = "#2c7fb8"
 BARRIER_COLORS = {"Absolutt": "#d7191c", "Partiell": "#fdae61"}
+# Higher number = wins when a segment is upstream of more than one
+# barrier (e.g. two barriers stacked on the same branch).
+BARRIER_PRIORITY = {"Absolutt": 2, "Partiell": 1}
 
 REVERSE_FLOW_DIRECTION = False  # see the note above
 
@@ -116,9 +130,9 @@ def build_graph(rivers):
     return G, edge_geom
 
 
-def trace_upstream(G, edge_geom, start_node):
-    """All edges that flow into start_node, directly or through any
-    number of tributaries -- a plain graph walk, so branching river
+def trace_upstream(G, start_node):
+    """All edge indices that flow into start_node, directly or through
+    any number of tributaries -- a plain graph walk, so branching river
     networks are handled automatically without double-counting."""
     visited_nodes = {start_node}
     stack = [start_node]
@@ -141,13 +155,18 @@ def main():
         default=str(ROOT / "data" / "raw" / "nve_elvenett" / "Elv_Elvenett.shp"),
         help="Path to the NVE Elvenett .shp file",
     )
+    parser.add_argument(
+        "--kommune",
+        default="Arendal",
+        help="Only process culverts in this kommune (must match the river file's coverage)",
+    )
     args = parser.parse_args()
 
     river_path = Path(args.river)
     if not river_path.exists():
         print(f"Could not find river shapefile at {river_path}")
-        print("Download the 'Elv' folder (Elv_Elvenett.shp/.shx/.dbf/.prj) from")
-        print("your NVE map data export and place it there, or pass --river.")
+        print("Place the 'Elv' folder (Elv_Elvenett.shp/.shx/.dbf/.prj) from")
+        print("your NVE map data export there, or pass --river.")
         raise SystemExit(1)
 
     culvert_csv = next((p for p in IN_CSV_CANDIDATES if p.exists()), None)
@@ -169,9 +188,14 @@ def main():
     print(f"  {len(rivers)} river line segments")
 
     print(f"Reading {culvert_csv} ...")
-    culverts = pd.read_csv(culvert_csv)
-    culverts = culverts[culverts["barrier_category"].isin(BARRIER_COLORS.keys())].copy()
-    print(f"  {len(culverts)} culverts are Absolutt/Partiell and will be processed")
+    all_culverts = pd.read_csv(culvert_csv)
+    culverts = all_culverts[
+        (all_culverts["kommune"] == args.kommune)
+        & (all_culverts["barrier_category"].isin(BARRIER_COLORS.keys()))
+    ].copy()
+    print(f"  {len(culverts)} culverts in {args.kommune} are Absolutt/Partiell and will be processed")
+    if len(culverts) == 0:
+        raise SystemExit(f"No Absolutt/Partiell culverts found for kommune='{args.kommune}'.")
 
     culvert_points = gpd.GeoDataFrame(
         culverts,
@@ -190,7 +214,11 @@ def main():
     # the first (closest) match for each culvert.
     nearest = nearest[~nearest.index.duplicated(keep="first")]
 
-    features = []
+    # Colour + priority for every edge in the network, defaulting to
+    # blue ("not impacted, or downstream of the blocking culvert").
+    edge_color = {idx: BLUE for idx in edge_geom}
+    edge_priority = {idx: 0 for idx in edge_geom}
+
     snap_lon, snap_lat, upstream_km, snap_dist_out = [], [], [], []
 
     for i, row in culvert_points.iterrows():
@@ -199,20 +227,22 @@ def main():
         geom = rivers.geometry.iloc[river_idx]
 
         coords = list(geom.coords)
-        start_node, end_node = node_key(coords[0]), node_key(coords[-1])
+        start_node = node_key(coords[0])
         proj_dist = geom.project(row.geometry)
         snapped_point = geom.interpolate(proj_dist)
-        upstream_partial = substring(geom, 0, proj_dist)
+        upstream_partial_length = substring(geom, 0, proj_dist).length
 
-        upstream_idxs = trace_upstream(G, edge_geom, start_node)
-        total_length_m = proj_dist + sum(edge_geom[j].length for j in upstream_idxs)
+        upstream_idxs = trace_upstream(G, start_node) + [river_idx]
+        total_length_m = upstream_partial_length + sum(
+            edge_geom[j].length for j in upstream_idxs if j != river_idx
+        )
 
-        color = BARRIER_COLORS[row["barrier_category"]]
-        segments = [upstream_partial] + [edge_geom[j] for j in upstream_idxs]
-        for seg in segments:
-            if seg.is_empty or seg.length == 0:
-                continue
-            features.append({"geometry": seg, "kulvert_id": row["id"], "farge": color, "kategori": row["barrier_category"]})
+        category = row["barrier_category"]
+        priority = BARRIER_PRIORITY[category]
+        for idx in upstream_idxs:
+            if priority > edge_priority[idx]:
+                edge_priority[idx] = priority
+                edge_color[idx] = BARRIER_COLORS[category]
 
         snapped_wgs84 = gpd.GeoSeries([snapped_point], crs=WORK_CRS).to_crs("EPSG:4326").iloc[0]
         snap_lon.append(snapped_wgs84.x)
@@ -229,31 +259,31 @@ def main():
     print(f"\n{n_suspicious} culverts snapped more than {SUSPICIOUS_SNAP_DISTANCE_M} m "
           f"away from their nearest river line -- worth a manual look.")
     print(f"Median upstream length unlocked: {culverts['oppstrom_lengde_km'].median():.2f} km")
+    n_red = sum(1 for c in edge_color.values() if c == BARRIER_COLORS["Absolutt"])
+    n_orange = sum(1 for c in edge_color.values() if c == BARRIER_COLORS["Partiell"])
+    n_blue = len(edge_color) - n_red - n_orange
+    print(f"River segments: {n_red} red, {n_orange} orange, {n_blue} blue")
 
     OUT_CSV.parent.mkdir(parents=True, exist_ok=True)
     culverts.drop(columns="geometry", errors="ignore").to_csv(OUT_CSV, index=False)
     print(f"Saved {OUT_CSV}")
 
-    lines_gdf = gpd.GeoDataFrame(features, crs=WORK_CRS).to_crs("EPSG:4326")
-    geojson = {
-        "type": "FeatureCollection",
-        "features": [
-            {
-                "type": "Feature",
-                "geometry": mapping(row.geometry),
-                "properties": {
-                    "kulvert_id": row["kulvert_id"],
-                    "farge": row["farge"],
-                    "kategori": row["kategori"],
-                },
-            }
-            for _, row in lines_gdf.iterrows()
-        ],
-    }
-    import json
-
+    rivers_wgs84 = rivers.to_crs("EPSG:4326")
+    name_col = "elvenavn" if "elvenavn" in rivers.columns else None
+    features = [
+        {
+            "type": "Feature",
+            "geometry": mapping(geom),
+            "properties": {
+                "farge": edge_color[idx],
+                "elvenavn": (rivers_wgs84.iloc[idx][name_col] if name_col else None),
+            },
+        }
+        for idx, geom in enumerate(rivers_wgs84.geometry)
+    ]
+    geojson = {"type": "FeatureCollection", "features": features}
     with open(OUT_GEOJSON, "w", encoding="utf-8") as f:
-        json.dump(geojson, f, ensure_ascii=False)
+        json.dump(geojson, f, ensure_ascii=False, default=str)
     print(f"Saved {OUT_GEOJSON}")
 
 
