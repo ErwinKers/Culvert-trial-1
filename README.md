@@ -75,9 +75,10 @@ scripts/
   03_lag_kart.py                build the final interactive map (output/agder_kulvert_kart.html)
   04_koble_til_elvenett.py      (optional, needs NVE river data) snap to river + trace upstream + score
   05_legg_til_innsjoer.py       (optional, needs NVE lake data) add the lake layer
+  06_legg_til_feltdata.py       (optional) bring in two more sheets from the original Excel file
 ```
 
-Run them in order (0, 2, 4, 5 are optional -- 1 then 3 alone already
+Run them in order (0, 2, 4, 5, 6 are optional -- 1 then 3 alone already
 gives you a working map, just without the river network).
 
 ### Step 0 -- (optional) re-export from Excel
@@ -331,6 +332,56 @@ visualisation, factor in a `vassdragNr`-based split between
 main-stem and tributary segments before estimating a per-segment
 discharge, unlike the flat per-unit assignment this project used.)*
 
+### Step 6 -- (optional) bring in two more sheets from the Excel file
+
+```bash
+python scripts/06_legg_til_feltdata.py --kommune Arendal
+```
+
+The original workbook has 20 sheets; this project had only ever used
+"Aggregert data". Two more turned out to have real, field-collected
+data worth adding:
+
+- **"Prioritering av stikkrenner"** ("prioritisation of culverts") --
+  the biologists' own field assessment for a subset of culverts:
+  whether it's actually on an anadromous-fish reach ("Anadrom
+  strekning?"), their own priority ranking, what kind of fix it needs
+  (light cleanup / minor improvement / extensive rebuild / "unclear,
+  needs a site visit"), and a free-text expert comment. This sheet uses
+  a different coordinate system than "Aggregert data" (EPSG:25833
+  instead of EPSG:25832) -- both real, just exported differently -- so
+  matching rows to our existing culverts is done by coordinate,
+  accepting only matches within `MATCH_DISTANCE_M` (15 m). All 44
+  Arendal barrier culverts matched, at essentially 0 m (i.e. the exact
+  same recorded site), and 9 of them are confirmed anadromous-fish
+  reaches.
+
+  **This already caught something real:** the culvert this project's
+  own scoring ranks #1 (`id 536`, Langsæveien) has an expert comment
+  saying it's *"antakelig ikke noe poeng å renske opp her da det ikke
+  er sjøørret her, og det er gjedde i Langsævannet"* -- "probably not
+  worth clearing since there's no sea trout here, and there's pike in
+  the lake above." The scoring model only measures reachable habitat
+  *area*; it has no way to know a species isn't present there, or that
+  a predatory fish already occupies the lake. This field is now in the
+  popup (open the map and click that dot), but **not yet factored into
+  the priority score itself** -- only 9 of 44 culverts have a definite
+  "Ja"/"Nei" here, so a blank isn't evidence of absence, and how to
+  treat "Nei" (zero out the score entirely? just flag it for manual
+  review?) is a judgement call worth making deliberately rather than
+  guessing.
+
+- **"SØ naturlig hunder"** ("suspected natural barriers") -- an actual
+  field register of observed/suspected natural barriers, several
+  cross-referenced against Norway's official salmon register
+  ("Lakseregistret"). This is real, ground-truthed data -- better than
+  the gradient *estimate* in step 4 wherever it exists. 6 of the
+  register's 518 entries (across all of Agder) fall within Arendal;
+  both layers stay on the map, clearly distinguished (a black diamond
+  for the field register vs. purple triangles for the modelled
+  estimate), since the field register only covers places someone
+  has actually been to check.
+
 ## Setup
 
 ```bash
@@ -339,6 +390,7 @@ python scripts/01_rens_kulvertdata.py
 python scripts/02_hent_hoydedata.py       # optional, needs internet, can take a while
 python scripts/04_koble_til_elvenett.py --river data/raw/nve_elvenett/Elv_Elvenett.shp --kommune Arendal --innsjo data/raw/nve_innsjo/Innsjo_Innsjo.shp
 python scripts/05_legg_til_innsjoer.py    # optional, lake map layer
+python scripts/06_legg_til_feltdata.py --kommune Arendal   # optional, real field-assessment data
 python scripts/03_lag_kart.py
 ```
 
@@ -396,6 +448,20 @@ time you view it.
   `KOMMUNE_FILTER`/`--kommune` settings are scoped to Arendal. The
   pipeline works the same way for any other kommune once you have a
   matching NVE export for it.
+- **"Anadrom strekning?" isn't factored into the score yet**, even
+  though step 6 pulls it in and puts it in the popup -- see the
+  Langsæveien example in step 6. Worth deciding deliberately how to use
+  it (exclude "Nei" entirely? just deprioritise it?) rather than
+  guessing.
+- **A promising option not yet built: Vann-Nett.** The Excel workbook's
+  "VF i Vannnett" sheet (2,580 rows, all of Agder) is an export from
+  Norway's official water body register, with an authoritative
+  "Anadrom fisk" (Ja/Nei) field per water body -- a stronger source
+  than "Anadrom strekning?" for the same question, and covering every
+  water body, not just the ones a student happened to note it for.
+  Wiring it in needs a join between this project's culverts/REGINE
+  codes and Vann-Nett's own `VannforekomstID` scheme, which don't share
+  a common key directly -- worth doing, just not done here yet.
 
 ## Project layout
 
@@ -403,7 +469,7 @@ time you view it.
 data/raw/                   source data, exported from Excel (small, no photos)
 data/raw/nve_elvenett/      NVE Elvenett river network shapefile for the current kommune (step 4)
 data/raw/nve_innsjo/        NVE lake polygons (step 4 scoring + step 5 map layer)
-data/processed/             cleaned CSV/GeoJSON + coloured river network + lakes (generated by scripts)
+data/processed/             cleaned CSV/GeoJSON + coloured river network + lakes + field data (generated by scripts)
 scripts/                    the six pipeline steps, run in order
 output/                     the final map (agder_kulvert_kart.html)
 ```

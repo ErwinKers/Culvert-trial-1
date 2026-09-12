@@ -68,20 +68,23 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parent.parent
 IN_CSV_CANDIDATES = [
+    ROOT / "data" / "processed" / "kulvert_punkter_feltdata.csv",
     ROOT / "data" / "processed" / "kulvert_punkter_oppstrom.csv",
     ROOT / "data" / "processed" / "kulvert_punkter_med_hoyde.csv",
     ROOT / "data" / "processed" / "kulvert_punkter.csv",
 ]
 IN_GEOJSON_RIVERS = ROOT / "data" / "processed" / "elvenett_farget.geojson"
 IN_GEOJSON_NATURAL = ROOT / "data" / "processed" / "naturlige_hindre.geojson"
+IN_GEOJSON_NATURAL_FELT = ROOT / "data" / "processed" / "naturlige_hindre_felt.geojson"
 IN_GEOJSON_LAKES = ROOT / "data" / "processed" / "innsjoer.geojson"
 OUT_HTML = ROOT / "output" / "agder_kulvert_kart.html"
 
 NATURAL_TIER_LABELS = {
-    "sikker": "Sannsynlig naturlig vandringshinder",
-    "mulig": "Mulig naturlig vandringshinder (usikker)",
+    "sikker": "Sannsynlig naturlig vandringshinder (modellert)",
+    "mulig": "Mulig naturlig vandringshinder (modellert, usikker)",
 }
 NATURAL_TIER_COLORS = {"sikker": "#7a0177", "mulig": "#c994c7"}
+NATURAL_FELT_COLOR = "#000000"
 
 # This map currently only covers one kommune, matching the NVE river
 # network export used in step 4. Change this (and re-run step 4 with a
@@ -115,7 +118,7 @@ def load_data():
     else:
         raise SystemExit("Run scripts/01_rens_kulvertdata.py first.")
 
-    if path.name != "kulvert_punkter_oppstrom.csv":
+    if "lat_snappet" not in df.columns:
         print("(run scripts/04_koble_til_elvenett.py to snap culverts onto the")
         print(" real river network and see how much habitat opens up upstream)")
 
@@ -138,7 +141,7 @@ def marker_position(row, has_snap):
     return row["lat_ned"], row["lon_ned"]
 
 
-def build_popup_html(row, has_height, has_snap):
+def build_popup_html(row, has_height, has_snap, has_feltdata):
     def field(label, value, unit=""):
         if pd.isna(value) or str(value).strip() in ("", "nan"):
             return ""
@@ -165,6 +168,12 @@ def build_popup_html(row, has_height, has_snap):
         html += field("Oppstrøms elvestrekning som åpnes", row.get("oppstrom_lengde_km"), " km")
         html += field("Oppstrøms innsjøareal som åpnes", row.get("oppstrom_innsjo_km2"), " km2")
         html += field("Avstand kartlagt punkt -> elvenett", row.get("snap_avstand_m"), " m")
+    if has_feltdata:
+        html += "<hr style='margin:4px 0'>"
+        html += field("Anadrom strekning (feltvurdering)", row.get("anadrom_strekning"))
+        html += field("Fagpersonens prioritering", row.get("ekspert_prioritering"))
+        html += field("Type tiltak", row.get("type_tiltak"))
+        html += field("Fagkommentar", row.get("fagkommentar"))
     html += field("Kommentar", row.get("kommentar"))
     html += "</div>"
     return html
@@ -241,7 +250,7 @@ def add_base_layers(m):
     ).add_to(m)
 
 
-def add_legend(m, has_rivers, has_score, has_natural, has_snap_warning):
+def add_legend(m, has_rivers, has_score, has_natural, has_natural_felt, has_snap_warning):
     rows = ""
     if has_score:
         rows += (
@@ -278,6 +287,13 @@ def add_legend(m, has_rivers, has_score, has_natural, has_snap_warning):
                 f"border-bottom:11px solid {color};margin-right:6px;vertical-align:middle'></span>"
                 f"{label}</div>"
             )
+    if has_natural_felt:
+        rows += (
+            f"<div style='margin:2px 0'>"
+            f"<span style='display:inline-block;width:9px;height:9px;transform:rotate(45deg);"
+            f"background:{NATURAL_FELT_COLOR};margin-right:8px;vertical-align:middle'></span>"
+            f"Naturlig hinder, feltregistrert (NVE/Lakseregistret)</div>"
+        )
     if has_snap_warning:
         rows += (
             f"<div style='margin:2px 0'>"
@@ -407,13 +423,43 @@ def add_natural_barrier_layer(m, geojson):
         group.add_to(m)
 
 
+def add_natural_felt_layer(m, geojson):
+    """Real, field-observed natural barriers (as opposed to the
+    modelled gradient-based ones) -- a solid black diamond, visually
+    distinct in both shape and colour from the modelled triangles, so
+    it's clear which is measured and which is estimated."""
+    group = folium.FeatureGroup(name="Naturlige hindre: feltregistrert (NVE/Lakseregistret)")
+    icon_html = (
+        f'<div style="width:0;height:0;transform:rotate(45deg);'
+        f"border:7px solid {NATURAL_FELT_COLOR};"
+        f'filter:drop-shadow(0 0 1px white);"></div>'
+    )
+    for feature in geojson["features"]:
+        lon, lat = feature["geometry"]["coordinates"][:2]
+        props = feature["properties"]
+        bekk = props.get("bekk") or "(ukjent bekk)"
+        popup_html = f"<b>Feltregistrert naturlig vandringshinder</b><br>Bekk: {bekk}<br>"
+        if props.get("beskrivelse"):
+            popup_html += f"{props['beskrivelse']}<br>"
+        if props.get("registrert"):
+            popup_html += f"Registrert: {props['registrert']}"
+        folium.Marker(
+            location=[lat, lon],
+            icon=folium.DivIcon(html=icon_html, icon_size=(14, 14), icon_anchor=(7, 7)),
+            popup=folium.Popup(popup_html, max_width=260),
+        ).add_to(group)
+    group.add_to(m)
+
+
 def main():
     df = load_data()
     has_height = "elevation_diff_m" in df.columns
     has_snap = "lat_snappet" in df.columns
     has_score = "prioriteringsscore" in df.columns
+    has_feltdata = "anadrom_strekning" in df.columns
     river_geojson = load_geojson(IN_GEOJSON_RIVERS)
     natural_geojson = load_geojson(IN_GEOJSON_NATURAL)
+    natural_felt_geojson = load_geojson(IN_GEOJSON_NATURAL_FELT)
     lake_geojson = load_geojson(IN_GEOJSON_LAKES)
 
     positions = df.apply(lambda r: marker_position(r, has_snap), axis=1, result_type="expand")
@@ -440,6 +486,9 @@ def main():
     if natural_geojson is not None and natural_geojson["features"]:
         add_natural_barrier_layer(m, natural_geojson)
 
+    if natural_felt_geojson is not None and natural_felt_geojson["features"]:
+        add_natural_felt_layer(m, natural_felt_geojson)
+
     groups = {cat: folium.FeatureGroup(name=f"Kulverter: {BARRIER_LABELS[cat]}") for cat in BARRIER_ORDER}
 
     for _, row in df.iterrows():
@@ -456,7 +505,7 @@ def main():
             fill_color=BARRIER_COLORS[cat],
             fill_opacity=0.9,
             weight=1,
-            popup=folium.Popup(build_popup_html(row, has_height, has_snap), max_width=300),
+            popup=folium.Popup(build_popup_html(row, has_height, has_snap, has_feltdata), max_width=300),
         ).add_to(group)
 
     for group in groups.values():
@@ -474,6 +523,7 @@ def main():
         river_geojson is not None,
         has_score,
         natural_geojson is not None and bool(natural_geojson["features"]),
+        natural_felt_geojson is not None and bool(natural_felt_geojson["features"]),
         n_flagged > 0,
     )
     folium.LayerControl(collapsed=False).add_to(m)
