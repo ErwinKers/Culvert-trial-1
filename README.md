@@ -77,9 +77,10 @@ scripts/
   05_legg_til_innsjoer.py       (optional, needs NVE lake data) add the lake layer
   06_legg_til_feltdata.py       (optional) bring in two more sheets from the original Excel file
   07_lag_rapport.py             (optional) write a prioritisation report (Word doc) with a draft søknad form
+  08_sjekk_fkb_vann.py          (optional, needs an FKB-Vann export) cross-check culvert positions against FKB-Vann
 ```
 
-Run them in order (0, 2, 4, 5, 6, 7 are optional -- 1 then 3 alone
+Run them in order (0, 2, 4, 5, 6, 7, 8 are optional -- 1 then 3 alone
 already gives you a working map, just without the river network).
 
 ### Step 0 -- (optional) re-export from Excel
@@ -429,6 +430,45 @@ This report is a drafting aid, not a substitute for the biologists'
 judgement or a ready-to-submit application -- read it over, and
 especially check the placeholder fields and the address, before using
 it for anything official.
+
+### Step 8 -- (optional) cross-check against FKB-Vann
+
+```bash
+python scripts/08_sjekk_fkb_vann.py --fkb path/to/fkb_vann_export.shp --kommune Arendal
+```
+
+**FKB-Vann** (Felles KartdataBase -- Vann) is Kartverket's detailed
+hydrography layer -- captured by aerial photogrammetry, so it's
+positionally more precise than Elvenett, but it's a cartographic
+dataset, not a connected network graph with flow direction the way
+Elvenett is. So it can't replace Elvenett for the upstream trace in
+step 4 -- it can only *check* it.
+
+This script doesn't change the network, the map, or the priority score.
+For every barrier culvert it measures how far the field coordinate (and
+separately, the point step 4 already snapped to on Elvenett) is from
+the nearest FKB-Vann stream line, and flags any culvert where the two
+datasets disagree by more than 15 m at the point already in use --
+worth a field look, and a likely explanation for some of the 13
+culverts step 4 already flags as snapping far from Elvenett. Results go
+to `data/processed/kulvert_fkb_sjekk.csv`.
+
+**Where to get FKB-Vann:** Kartverket's national base map layer,
+distributed through Geonorge (`nedlasting.geonorge.no`, needs a free
+GeoID login) as SOSI/GML/shapefile per kommune, or via a regional portal
+like Agder's own [agderkart.no](https://agderkart.no/agderkart). Get
+the export for Arendal and pass its path with `--fkb`.
+
+**This script's object-type filtering hasn't been run against a real
+FKB-Vann export** -- there was no route to Geonorge/Agderkart from the
+sandbox this was written in, only a synthetic test file, so the column
+detection is deliberately defensive: it looks for an object-type column
+(commonly `objtype`) to keep only stream/canal centrelines (`ElvBekk`,
+`Kanal`) and exclude polygon-edge types (`...Kant`), but falls back to
+"use every line in the file" with a clear console warning if that
+column isn't where expected. If it guesses wrong on your actual file,
+the printed column names and object-type values make it straightforward
+to fix.
 
 ## Setup
 
