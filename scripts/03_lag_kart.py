@@ -60,6 +60,7 @@ Usage
     python scripts/03_lag_kart.py
 """
 
+import argparse
 import json
 from pathlib import Path
 
@@ -247,6 +248,40 @@ def add_base_layers(m):
         attr="Kartverket",
         name="Kartverket topografisk (kan trenge oppdatert URL)",
         overlay=False,
+        control=True,
+        show=False,
+    ).add_to(m)
+
+
+def add_fkb_vann_wms_test_layer(m):
+    """EXPERIMENTAL, off by default: overlay Kartverket's live FKB-Vann WMS.
+
+    This is not the same thing as scripts/08_sjekk_fkb_vann.py -- that
+    script does an actual position comparison against a downloaded
+    FKB-Vann file. This is just a quick visual check: it asks Kartverket's
+    public FKB WMS service, live, for map tiles of the water layer, so
+    you can eyeball how FKB-Vann's stream lines compare to the
+    Elvenett network already drawn on this map, with no download and no
+    processing at all.
+
+    Needs an internet connection *in the browser viewing the map* (same
+    as the other background layers) -- this script itself doesn't fetch
+    anything. The service, its layer name ("Vann"), and its behaviour
+    were found via web search, not tested live (this project's build
+    environment has no route to Kartverket's WMS servers) -- if the
+    layer comes back blank, check the current GetCapabilities at
+    https://wms.geonorge.no/skwms1/wms.fkb for the right LAYERS value
+    and fix it here.
+    """
+    folium.WmsTileLayer(
+        url="https://wms.geonorge.no/skwms1/wms.fkb",
+        layers="Vann",
+        fmt="image/png",
+        transparent=True,
+        version="1.3.0",
+        attr="Kartverket (FKB-Vann WMS)",
+        name="FKB-Vann (TEST -- live WMS, sammenlign med elvenett)",
+        overlay=True,
         control=True,
         show=False,
     ).add_to(m)
@@ -454,6 +489,16 @@ def add_natural_felt_layer(m, geojson):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--out", default=str(OUT_HTML), help="Output HTML path (default: %(default)s)")
+    parser.add_argument(
+        "--fkb-wms-test",
+        action="store_true",
+        help="Add an experimental, off-by-default live FKB-Vann WMS overlay for visual comparison (see add_fkb_vann_wms_test_layer)",
+    )
+    args = parser.parse_args()
+    out_html = Path(args.out)
+
     df = load_data()
     has_height = "elevation_diff_m" in df.columns
     has_snap = "lat_snappet" in df.columns
@@ -472,6 +517,8 @@ def main():
 
     m = folium.Map(location=[center_lat, center_lon], zoom_start=11, tiles=None)
     add_base_layers(m)
+    if args.fkb_wms_test:
+        add_fkb_vann_wms_test_layer(m)
 
     if lake_geojson is not None:
         add_lake_layer(m, lake_geojson)
@@ -534,9 +581,9 @@ def main():
     bounds = [[df["_map_lat"].min(), df["_map_lon"].min()], [df["_map_lat"].max(), df["_map_lon"].max()]]
     m.fit_bounds(bounds)
 
-    OUT_HTML.parent.mkdir(parents=True, exist_ok=True)
-    m.save(str(OUT_HTML))
-    print(f"Saved map to {OUT_HTML}")
+    out_html.parent.mkdir(parents=True, exist_ok=True)
+    m.save(str(out_html))
+    print(f"Saved map to {out_html}")
     print("Open this file in a web browser to view it.")
 
 
