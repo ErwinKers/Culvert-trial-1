@@ -78,9 +78,10 @@ scripts/
   06_legg_til_feltdata.py       (optional) bring in two more sheets from the original Excel file
   07_lag_rapport.py             (optional) write a prioritisation report (Word doc) with a draft søknad form
   08_sjekk_fkb_vann.py          (optional, needs an FKB-Vann export) cross-check culvert positions against FKB-Vann
+  09_hoydeprofil.py             (optional, needs elevation data) height profile of a whole vassdrag, with candidate foss locations
 ```
 
-Run them in order (0, 2, 4, 5, 6, 7, 8 are optional -- 1 then 3 alone
+Run them in order (0, 2, 4, 5, 6, 7, 8, 9 are optional -- 1 then 3 alone
 already gives you a working map, just without the river network).
 
 ### Step 0 -- (optional) re-export from Excel
@@ -469,6 +470,57 @@ detection is deliberately defensive: it looks for an object-type column
 column isn't where expected. If it guesses wrong on your actual file,
 the printed column names and object-type values make it straightforward
 to fix.
+
+### Step 9 -- (optional) height profile of a whole vassdrag
+
+```bash
+python scripts/09_hoydeprofil.py --dtm path/to/dtm.tif --vassdrag Arendalsvassdraget
+# or, without a downloaded DTM file:
+python scripts/09_hoydeprofil.py --hoyde-api --vassdrag Arendalsvassdraget
+```
+
+Step 4's natural-barrier detection works per short river segment, which
+makes it hard to eyeball against what you already know about a real
+river. This script instead walks a WHOLE named vassdrag from mouth to
+source and draws an actual elevation profile (PNG), marking every point
+where the same smoothed gradient used in step 4
+(`NATURAL_GRADIENT_CERTAIN` = 10%, `NATURAL_GRADIENT_CAUTIOUS` = 7%,
+smoothed over the same 100 m window) would flag a likely or possible
+natural waterfall/rapid -- a way to sanity-check the method against a
+river whose real waterfalls you already know, not a different
+detection method.
+
+Since NVE's Elvenett only names a minority of segments (and, checked
+directly, filtering on that name alone leaves gaps -- some connecting
+stretches carry a different name or none), this script filters on the
+more complete `hierarki` field instead and finds the *longest path*
+through the matched segments (by river length) -- this reliably picks
+out the single main-stem line from mouth to furthest headwater without
+needing to trust segment names or the digitisation direction. For
+Arendalsvassdraget this finds a 17.3 km main stem through 52 segments,
+correctly bridging naming gaps that a plain name-filter misses.
+
+**Most precise elevation source:** `--dtm` with a downloaded GeoTIFF
+from Kartverket's <https://hoydedata.no/> -- their actual national
+terrain model ("Nasjonal detaljert hoydemodell"), a 1x1 m laser-scanned
+grid nationally (finer in some specifically surveyed areas). Reading a
+downloaded raster directly also lets you sample as densely as you want
+along the river for free, unlike the point API. `--hoyde-api` (the same
+Kartverket web service steps 2 and 4 use) queries the *same* underlying
+height model, just one point at a time over the internet -- use it if
+you'd rather not download a DTM file first.
+
+**Tested with a synthetic DTM (an 8 m drop over 30 m, injected into a
+raster covering the real Arendalsvassdraget main-stem geometry), not
+real elevation data** -- this sandbox has no route to Kartverket's
+services (see the earlier elevation-data discussion in this project).
+The synthetic test confirmed the main-stem finding, sampling, and
+candidate-detection logic all work correctly: the injected drop was
+located at the right distance along the river, and -- correctly -- only
+triggered the "mulig" (cautious) tier rather than "sikker", since a
+narrow 30 m drop gets diluted by the 100 m smoothing window, same
+behaviour as step 4. Real elevation data will behave differently; this
+just confirms the mechanics are sound.
 
 ## Setup
 

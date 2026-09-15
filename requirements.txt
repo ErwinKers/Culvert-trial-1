@@ -9,3 +9,4 @@ shapely
 networkx
 rasterio
 python-docx
+matplotlib
