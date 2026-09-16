@@ -59,17 +59,19 @@ to the side of the actual stream. So instead we:
      the most habitat (by both measures) scores 100, relative to the
      other barriers in this run.
 
-     **Exception:** if FKB-Vann confirms real water within
-     FKB_CONFIRMS_WATER_DISTANCE_M of a culvert's field coordinate, but
-     its Elvenett edge is still more than SUSPICIOUS_SNAP_DISTANCE_M
-     away (Elvenett simply has no edge anywhere nearby -- input
-     correction can only pick a better EXISTING edge, not invent one),
-     that culvert isn't genuinely ON the stream the walk above just
-     traced. Its `oppstrom_lengde_km`, `oppstrom_innsjo_km2`, and
-     `prioriteringsscore` are left blank rather than reporting a
+     **Exception:** a culvert isn't genuinely a migration barrier ON a
+     stream more than SUSPICIOUS_SNAP_DISTANCE_M away from it, so if a
+     culvert's Elvenett edge is that far away (input correction from
+     FKB-Vann, above, can only pick a better EXISTING edge, it can't
+     invent one where the network simply has a gap), it's excluded from
+     the walk/colouring entirely: it doesn't colour that distant edge
+     red/orange, and it doesn't act as a stop for any OTHER culvert's
+     walk either. Its own `oppstrom_lengde_km`, `oppstrom_innsjo_km2`,
+     and `prioriteringsscore` are left blank rather than reporting a
      plausible-looking number computed from the wrong, unrelated stream
      -- flagged `score_upalitelig`. It's still a real barrier and still
-     shown on the map, just without a fabricated figure attached.
+     shown on the map, just without a fabricated figure or a false
+     "blocked" colouring attached to a stream it isn't on.
 
 Only culverts assessed as "Absolutt" (total barrier) or "Partiell"
 (partial barrier) count as barriers here.
@@ -187,16 +189,13 @@ NODE_SNAP_TOLERANCE_M = 1.0
 # it (nothing better to do), but flag it so you can review it.
 SUSPICIOUS_SNAP_DISTANCE_M = 50.0
 
-# If FKB-Vann confirms real water within this distance of the field
-# coordinate, but the culvert's ELVENETT edge is STILL more than
-# SUSPICIOUS_SNAP_DISTANCE_M away (because Elvenett simply has no edge
-# anywhere nearby -- FKB-Vann-informed input correction can only pick a
-# better EXISTING Elvenett edge, it can't invent one where there isn't
-# one), the culvert isn't genuinely ON the stream Elvenett would trace
-# from -- so treating it as a migration barrier on that unrelated stream
-# would be wrong, not just uncertain. Flagged as `score_upalitelig`, and
-# its upstream-length/priority-score are left blank (not computed at
-# all) rather than showing a plausible-looking but fabricated number.
+# Purely a diagnostic threshold (does NOT gate score_upalitelig): among
+# the culverts more than SUSPICIOUS_SNAP_DISTANCE_M from their Elvenett
+# edge, this separates the ones where FKB-Vann confirms real water right
+# at the field point (so we're confident it's a real barrier, just on a
+# stream Elvenett doesn't map there) from the ones with no such
+# confirmation (where the field coordinate itself might simply be off).
+# See the console output this feeds.
 FKB_CONFIRMS_WATER_DISTANCE_M = 30.0
 
 # Natural-barrier screening: gradient smoothed over this many metres of
@@ -646,7 +645,8 @@ def main():
     # processed culvert, keyed by row index, plus a lookup of which
     # Absolutt-barrier snap points sit on which edge (used to stop
     # OTHER culverts' upstream walks).
-    snap_edge, snap_proj = {}, {}
+    snap_edge, snap_proj, elvenett_point_by_i = {}, {}, {}
+    elvenett_avstand = pd.Series(float("nan"), index=culvert_points.index)
     absolutt_cuts_by_edge = {}
     for i, row in culvert_points.iterrows():
         river_idx = int(nearest.loc[i, "index_right"])
@@ -658,7 +658,18 @@ def main():
         proj_dist = geom.project(snap_source.loc[i])
         snap_edge[i] = river_idx
         snap_proj[i] = proj_dist
-        if row["barrier_category"] == "Absolutt":
+        elvenett_point = geom.interpolate(proj_dist)
+        elvenett_point_by_i[i] = elvenett_point
+        elvenett_avstand.loc[i] = row.geometry.distance(elvenett_point)
+        # A culvert whose nearest Elvenett edge is this far away isn't
+        # genuinely ON that stream (see SUSPICIOUS_SNAP_DISTANCE_M) --
+        # so it shouldn't be able to act as a barrier THAT stream is
+        # blocked by, any more than we'd compute ITS OWN upstream reach
+        # from that unrelated edge (see the score_upalitelig handling
+        # below). Simply not registering it here means other culverts'
+        # walks pass straight through, and its own walk (below) reaches
+        # nothing worth colouring on that edge either.
+        if row["barrier_category"] == "Absolutt" and elvenett_avstand.loc[i] <= SUSPICIOUS_SNAP_DISTANCE_M:
             absolutt_cuts_by_edge.setdefault(river_idx, []).append((i, proj_dist))
 
     def stops_on_edge(edge_idx, exclude_culvert_i):
@@ -705,18 +716,25 @@ def main():
 
     print("Tracing upstream from each culvert (stopping at other barriers) ...")
     upstream_km, upstream_lake_km2, snap_dist_out, snap_lon, snap_lat = [], [], [], [], []
-    elvenett_dist_out = []
     edge_intervals = {}  # edge_idx -> list of (start, end, priority)
 
     for i, row in culvert_points.iterrows():
+        # A culvert whose Elvenett edge is more than SUSPICIOUS_SNAP_DISTANCE_M
+        # away isn't genuinely ON that stream (see the note where
+        # absolutt_cuts_by_edge is built above) -- so its own walk
+        # shouldn't colour that distant, likely-unrelated edge as
+        # "blocked" either, even though we still trace it (below) purely
+        # to know how far it reaches, for diagnostics.
+        on_elvenett = elvenett_avstand.loc[i] <= SUSPICIOUS_SNAP_DISTANCE_M
         pieces, total_length_m = trace_upstream(i)
         category = row["barrier_category"]
         priority = BARRIER_PRIORITY[category]
-        for edge_idx, s, e in pieces:
-            edge_intervals.setdefault(edge_idx, []).append((s, e, priority))
+        if on_elvenett:
+            for edge_idx, s, e in pieces:
+                edge_intervals.setdefault(edge_idx, []).append((s, e, priority))
 
         lake_km2 = 0.0
-        if lakes is not None and pieces:
+        if on_elvenett and lakes is not None and pieces:
             piece_geoms = [substring(edge_geom[edge_idx], s, e) for edge_idx, s, e in pieces]
             piece_geoms = [g for g in piece_geoms if not g.is_empty]
             if piece_geoms:
@@ -726,13 +744,9 @@ def main():
         upstream_lake_km2.append(lake_km2)
 
         # The point used for the GRAPH WALK above is always on Elvenett
-        # (the network needs an actual edge to trace from) -- keep track
-        # of how far THAT is from the field point (elvenett_avstand_m),
-        # regardless of what gets displayed, since that's what actually
-        # determines whether the trace/score below means anything.
-        geom = rivers.geometry.iloc[snap_edge[i]]
-        elvenett_point = geom.interpolate(snap_proj[i])
-        elvenett_dist_out.append(float(row.geometry.distance(elvenett_point)))
+        # (the network needs an actual edge to trace from) -- already
+        # computed above as elvenett_point_by_i/elvenett_avstand.
+        elvenett_point = elvenett_point_by_i[i]
 
         # The point we DISPLAY is different: when FKB-Vann informed this
         # culvert's snap, show it at FKB-Vann's own point -- the more
@@ -756,7 +770,7 @@ def main():
     culverts["lon_snappet"] = snap_lon
     culverts["lat_snappet"] = snap_lat
     culverts["snap_avstand_m"] = snap_dist_out
-    culverts["elvenett_avstand_m"] = elvenett_dist_out
+    culverts["elvenett_avstand_m"] = elvenett_avstand.values
     culverts["snap_kilde"] = snap_kilde.values
     culverts["fkb_avstand_felt_m"] = fkb_avstand_felt.values
     # NOTE: deliberately checks elvenett_avstand_m here, not
@@ -765,22 +779,25 @@ def main():
     # construction), but what determines whether the trace/score can be
     # trusted is "how far is the ELVENETT EDGE we're tracing from" --
     # those are different questions once the marker can sit at FKB-Vann's
-    # point instead of on the Elvenett line itself.
-    culverts["score_upalitelig"] = (
-        (culverts["fkb_avstand_felt_m"] < FKB_CONFIRMS_WATER_DISTANCE_M)
-        & (culverts["elvenett_avstand_m"] > SUSPICIOUS_SNAP_DISTANCE_M)
-    )
+    # point instead of on the Elvenett line itself. A culvert simply
+    # isn't a migration barrier ON a stream more than
+    # SUSPICIOUS_SNAP_DISTANCE_M away from it, full stop -- regardless of
+    # whether FKB-Vann happens to confirm real water nearby or not, so
+    # this no longer requires that extra condition (it did in an earlier
+    # version of this script; FKB_CONFIRMS_WATER_DISTANCE_M is kept only
+    # as a separate diagnostic, see fkb_avstand_felt_m below).
+    culverts["score_upalitelig"] = culverts["elvenett_avstand_m"] > SUSPICIOUS_SNAP_DISTANCE_M
     culverts["oppstrom_lengde_km"] = upstream_km
     culverts["oppstrom_innsjo_km2"] = upstream_lake_km2
 
-    # For score_upalitelig culverts, the walk above ran on a distant,
-    # unrelated Elvenett edge (FKB-Vann confirms real water at the field
-    # point, but Elvenett has no edge anywhere nearby) -- so the
-    # resulting "reachable habitat" figures don't actually describe the
-    # stream this culvert is on. Blank them rather than reporting a
-    # plausible-looking but fabricated number for a stream it isn't
-    # really a barrier on; the priority score below inherits the blank
-    # automatically since it's ranked from these two columns.
+    # score_upalitelig culverts aren't genuinely ON the Elvenett edge
+    # they'd otherwise trace from (it's more than SUSPICIOUS_SNAP_DISTANCE_M
+    # away) -- already excluded above from colouring the network and from
+    # acting as a stop for other culverts' walks. Blank their own
+    # "reachable habitat" figures too, for the same reason: they don't
+    # actually describe a stream this culvert is a barrier on. The
+    # priority score below inherits the blank automatically since it's
+    # ranked from these two columns.
     culverts.loc[culverts["score_upalitelig"], ["oppstrom_lengde_km", "oppstrom_innsjo_km2"]] = float("nan")
 
     # Priority score: rank each culvert on river length opened up AND
@@ -802,19 +819,24 @@ def main():
     n_suspicious = (culverts["snap_avstand_m"] > SUSPICIOUS_SNAP_DISTANCE_M).sum()
     print(f"\n{n_suspicious} culverts placed (marker position) more than "
           f"{SUSPICIOUS_SNAP_DISTANCE_M:.0f} m from their field coordinate -- worth a manual look.")
-    n_elvenett_far = (culverts["elvenett_avstand_m"] > SUSPICIOUS_SNAP_DISTANCE_M).sum()
-    print(f"{n_elvenett_far} culverts trace from an Elvenett edge more than "
-          f"{SUSPICIOUS_SNAP_DISTANCE_M:.0f} m from their field coordinate (this is what the "
-          f"upstream walk/score actually use, regardless of where the marker itself is drawn).")
     n_unreliable = int(culverts["score_upalitelig"].sum())
-    if n_unreliable:
+    print(
+        f"{n_unreliable} culverts are more than {SUSPICIOUS_SNAP_DISTANCE_M:.0f} m from the "
+        f"Elvenett edge they'd otherwise trace from -- not genuinely a migration barrier on that "
+        f"stream, so they don't colour it, don't stop other culverts' walks on it, and get no "
+        f"oppstrom_lengde_km/oppstrom_innsjo_km2/prioriteringsscore of their own (flagged "
+        f"score_upalitelig=True) rather than a number computed from the wrong, unrelated stream."
+    )
+    n_fkb_confirmed = int(
+        (culverts["score_upalitelig"] & (culverts["fkb_avstand_felt_m"] < FKB_CONFIRMS_WATER_DISTANCE_M)).sum()
+    )
+    if n_fkb_confirmed:
         print(
-            f"  {n_unreliable} of those have FKB-Vann confirming real water within "
-            f"{FKB_CONFIRMS_WATER_DISTANCE_M:.0f} m of the field point, but Elvenett has no "
-            f"edge anywhere nearby -- not genuinely a barrier on the stream Elvenett would trace "
-            f"from, so oppstrom_lengde_km/oppstrom_innsjo_km2/prioriteringsscore are left blank "
-            f"for these (flagged score_upalitelig=True) rather than computed from the wrong, "
-            f"unrelated stream."
+            f"  {n_fkb_confirmed} of those have FKB-Vann confirming real water within "
+            f"{FKB_CONFIRMS_WATER_DISTANCE_M:.0f} m of the field point (so we're confident these "
+            f"really are barriers, just on a stream Elvenett doesn't map there) -- the other "
+            f"{n_unreliable - n_fkb_confirmed} have no such confirmation either, so it's also "
+            f"possible the field coordinate itself is simply off."
         )
     print(f"Median upstream length unlocked: {culverts['oppstrom_lengde_km'].median():.2f} km")
     if lakes is not None:

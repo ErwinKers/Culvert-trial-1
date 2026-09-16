@@ -141,12 +141,12 @@ def add_kv_table(doc, rows):
 
 
 def build_report(culverts, kommune, top_n):
-    # Culverts flagged score_upalitelig (see step 4: FKB-Vann confirms
-    # real water at the field point, but Elvenett has no edge anywhere
-    # nearby, so the trace was forced onto a distant, likely unrelated
-    # stream) are excluded from the ranked list -- their score number is
-    # not trustworthy enough to sort a "fix this first" recommendation
-    # by, even though the culvert itself is still a real, mapped barrier.
+    # Culverts flagged score_upalitelig (see step 4: their Elvenett edge
+    # is too far from the field coordinate to be genuinely the stream
+    # this culvert is a barrier on, so step 4 doesn't compute a score for
+    # them at all) are excluded from the ranked list -- there's no
+    # number to sort by, even though the culvert itself is still a real,
+    # mapped barrier.
     has_unreliable_col = "score_upalitelig" in culverts.columns
     unreliable = culverts[culverts["score_upalitelig"]] if has_unreliable_col else culverts.iloc[0:0]
     rankable = culverts[~culverts["score_upalitelig"]] if has_unreliable_col else culverts
@@ -192,13 +192,20 @@ def build_report(culverts, kommune, top_n):
         "eksakt systemtotal."
     ).runs[0].italic = True
     if len(unreliable) > 0:
+        n_fkb_confirmed = int(
+            (unreliable.get("fkb_avstand_felt_m", pd.Series(dtype=float)) < 30).sum()
+        )
         doc.add_paragraph(
-            f"{len(unreliable)} vandringshinder er utelatt fra rangeringen under: FKB-Vann "
-            f"bekrefter vann ved feltkoordinaten, men elvenett har ingen kartlagt gren i "
-            f"nærheten, så prioriteringsscore og elvestrekning for disse ville vært beregnet fra "
-            f"feil/urelatert bekk -- de er derfor ikke beregnet i det hele tatt, framfor å vise "
-            f"et misvisende tall. De er fortsatt reelle, kartlagte vandringshinder -- bare ikke "
-            f"rangert eller tallfestet her. Berørte steder: "
+            f"{len(unreliable)} vandringshinder er utelatt fra rangeringen under: elvenett har "
+            f"ingen kartlagt gren i nærheten av feltkoordinaten (mer enn 50 m unna), så "
+            f"prioriteringsscore og elvestrekning for disse ville vært beregnet fra feil/urelatert "
+            f"bekk -- de er derfor ikke beregnet i det hele tatt, framfor å vise et misvisende tall. "
+            f"{n_fkb_confirmed} av disse har FKB-Vann som bekrefter reelt vann rett ved "
+            f"feltkoordinaten (så vi er sikre på at de er reelle hindre, bare på en bekk elvenett "
+            f"ikke kartlegger der); for de resterende {len(unreliable) - n_fkb_confirmed} mangler "
+            f"denne bekreftelsen også, så feltkoordinaten kan rett og slett være unøyaktig. Alle er "
+            f"fortsatt reelle, kartlagte vandringshinder -- bare ikke rangert eller tallfestet her. "
+            f"Berørte steder: "
             + ", ".join(fmt(s) for s in unreliable["stedsnavn"].tolist()) + "."
         ).runs[0].italic = True
 

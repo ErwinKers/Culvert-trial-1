@@ -240,10 +240,16 @@ def build_popup_html(row, has_height, has_snap, has_feltdata):
     if has_snap:
         html += "<hr style='margin:4px 0'>"
         if row.get("score_upalitelig"):
+            fkb_confirms = pd.notna(row.get("fkb_avstand_felt_m")) and row.get("fkb_avstand_felt_m") < 30
+            why = (
+                "FKB-Vann bekrefter vann her, men elvenett har ingen kartlagt gren i nærheten"
+                if fkb_confirms
+                else "elvenett har ingen kartlagt gren i nærheten av feltkoordinatet"
+            )
             html += (
-                "<b style='color:#d7191c'>OBS: score ikke beregnet</b> -- FKB-Vann bekrefter "
-                "vann her, men elvenett har ingen kartlagt gren i nærheten, så prioriteringsscore "
-                "og elvestrekning ville vært beregnet fra feil/urelatert bekk. Ikke vist under.<br>"
+                f"<b style='color:#d7191c'>OBS: score ikke beregnet</b> -- {why}, så "
+                f"prioriteringsscore og elvestrekning ville vært beregnet fra feil/urelatert bekk. "
+                f"Ikke vist under.<br>"
             )
         html += field("Prioriteringsscore (0-100)", row.get("prioriteringsscore"))
         html += field("Oppstrøms elvestrekning som åpnes", row.get("oppstrom_lengde_km"), " km")
@@ -449,7 +455,7 @@ def add_legend(
             f"<div style='margin:2px 0'>"
             f"<span style='display:inline-block;width:12px;height:12px;border-radius:50%;"
             f"border:3px dashed #000;margin-right:6px;vertical-align:middle'></span>"
-            f"Score ikke beregnet -- FKB-Vann bekrefter vann her, men elvenett har ingen gren i nærheten</div>"
+            f"Score ikke beregnet -- elvenett har ingen kartlagt gren &gt;50 m unna (se felt for detaljer)</div>"
         )
 
     legend_html = f"""
