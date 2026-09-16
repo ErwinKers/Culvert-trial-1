@@ -82,13 +82,16 @@ It shows:
   than merged, letting you see at a glance where one has a stream the
   other doesn't.
 - *(If step 4 found any)* a **black dashed ring** around a culvert
-  whose priority score is flagged unreliable: FKB-Vann confirms real
-  water right at the field coordinate, but Elvenett has no network edge
-  anywhere nearby, so the upstream trace was forced onto a distant,
-  probably unrelated stream. 7 of 44 in the current Arendal run -- see
-  step 4's `score_upalitelig` note below. These are excluded from step
-  7's ranked report entirely, since their score number can't be
-  trusted enough to rank by.
+  whose priority score and upstream-habitat figures are **not
+  computed at all**: FKB-Vann confirms real water right at the field
+  coordinate, but Elvenett has no network edge anywhere nearby, so
+  there's no stream this culvert is genuinely a migration barrier *on*
+  to trace from -- rather than presenting a plausible-looking number
+  computed from a distant, unrelated stream, the popup just says so and
+  leaves the score/length fields blank. 7 of 44 in the current Arendal
+  run -- see step 4's `score_upalitelig` note below. These are excluded
+  from step 7's ranked report entirely (there's no number to rank by),
+  but still listed there by name as real, mapped barriers.
 - Click any dot for details: place name, municipality, river/stream
   ("vassdrag"), the biologists' comments, diameter, length, priority
   score, and how many km of river / km2 of lake would open up if that
@@ -251,14 +254,18 @@ where the priority score is worked out. It:
    (so the marker itself ends up accurately placed), but Elvenett has
    no edge *anywhere* nearby -- correcting the input point can only
    pick a better *existing* Elvenett edge, it can't invent one where
-   the network simply has a gap. For these, the walk is still forced
-   onto the nearest (possibly 500+ m away, likely unrelated) Elvenett
-   edge, so the resulting `oppstrom_lengde_km` and priority score are
-   probably wrong even though the dot itself is in the right place --
-   flagged as `score_upalitelig` in the output and excluded from step
-   7's ranked report, and shown on the map as a culvert with a thick
-   black dashed ring around it, rather than silently presenting a
-   fabricated-looking number.
+   the network simply has a gap. Snapping onto the nearest (possibly
+   500+ m away, likely unrelated) Elvenett edge anyway and tracing from
+   it would mean treating the culvert as a migration barrier on a
+   stream it isn't actually on -- so instead, for these, the walk still
+   runs (needed to know where the *colouring* on that distant edge
+   itself should stop) but `oppstrom_lengde_km`, `oppstrom_innsjo_km2`,
+   and `prioriteringsscore` are left **blank, not computed at all** --
+   flagged `score_upalitelig` in the output, excluded from step 7's
+   ranked report, and shown on the map as a culvert with a thick black
+   dashed ring and no size-scaled dot (it falls back to a fixed radius,
+   since there's no score to size it by), rather than a plausible-
+   looking but fabricated number.
 3. **Walks upstream** through the network graph from that snapped
    point, collecting every segment that genuinely becomes reachable --
    handling branches/tributaries correctly, without double-counting --
@@ -381,9 +388,9 @@ both against `SUSPICIOUS_SNAP_DISTANCE_M` (50 m):
   FKB-Vann can place the *marker* accurately without Elvenett having
   anything nearby to trace from. 7 of those 13 are the
   `score_upalitelig` culverts (see above) -- their marker is fine
-  (FKB-Vann confirms real water right at the field point) but their
-  score isn't, a genuine Elvenett network gap that snapping logic alone
-  can't fix.
+  (FKB-Vann confirms real water right at the field point), but their
+  score is left blank rather than computed from an unrelated stream, a
+  genuine Elvenett network gap that snapping logic alone can't fix.
 
 **Step 3 draws the `snap_avstand_m` warning on the map:** a dashed line
 from the original field coordinate to the point actually used, with a
@@ -501,15 +508,15 @@ rounded to 2 decimals throughout), the field comments, and a
 pipe", "build a gentle ramp/threshold so fish don't have to jump".
 That suggestion is picked in order of how reliable the source is:
 
-**Culverts flagged `score_upalitelig` by step 4 are excluded from the
-ranking** -- FKB-Vann confirms real water at those field coordinates,
-but Elvenett has no network edge anywhere nearby, so their priority
-score is probably computed from the wrong, unrelated stream (see step
-4). Ranking a "fix this first" list by a number known to be unreliable
-would be worse than not ranking it at all. They're still real, mapped
-barriers -- just not sorted here -- and the report's summary section
-names them explicitly so nothing is silently dropped. 7 of 44 in the
-current Arendal run.
+**Culverts flagged `score_upalitelig` by step 4 have no score to rank
+by in the first place, so they're excluded from the ranking** --
+FKB-Vann confirms real water at those field coordinates, but Elvenett
+has no network edge anywhere nearby, so step 4 leaves their priority
+score and upstream-habitat figures blank rather than computing them
+from the wrong, unrelated stream (see step 4). They're still real,
+mapped barriers -- just not sorted or given a fabricated number here --
+and the report's summary section names them explicitly by site so
+nothing is silently dropped. 7 of 44 in the current Arendal run.
 
 1. The biologists' own `type_tiltak` field from step 6 ("Lett rensk",
    "Mindre utbedring", "Omfattende utbedring", ...), when present --

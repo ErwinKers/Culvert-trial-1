@@ -195,9 +195,10 @@ def build_report(culverts, kommune, top_n):
         doc.add_paragraph(
             f"{len(unreliable)} vandringshinder er utelatt fra rangeringen under: FKB-Vann "
             f"bekrefter vann ved feltkoordinaten, men elvenett har ingen kartlagt gren i "
-            f"nærheten, så prioriteringsscore for disse er trolig beregnet fra feil/urelatert "
-            f"bekk og ikke pålitelig nok til å rangere etter. De er fortsatt reelle, kartlagte "
-            f"vandringshinder -- bare ikke rangert her. Berørte steder: "
+            f"nærheten, så prioriteringsscore og elvestrekning for disse ville vært beregnet fra "
+            f"feil/urelatert bekk -- de er derfor ikke beregnet i det hele tatt, framfor å vise "
+            f"et misvisende tall. De er fortsatt reelle, kartlagte vandringshinder -- bare ikke "
+            f"rangert eller tallfestet her. Berørte steder: "
             + ", ".join(fmt(s) for s in unreliable["stedsnavn"].tolist()) + "."
         ).runs[0].italic = True
 

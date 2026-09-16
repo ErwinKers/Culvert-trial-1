@@ -241,9 +241,9 @@ def build_popup_html(row, has_height, has_snap, has_feltdata):
         html += "<hr style='margin:4px 0'>"
         if row.get("score_upalitelig"):
             html += (
-                "<b style='color:#d7191c'>OBS: usikker score</b> -- FKB-Vann bekrefter vann "
-                "her, men elvenett har ingen kartlagt gren i nærheten, så prioriteringsscore og "
-                "elvestrekning under er trolig beregnet fra feil/urelatert bekk.<br>"
+                "<b style='color:#d7191c'>OBS: score ikke beregnet</b> -- FKB-Vann bekrefter "
+                "vann her, men elvenett har ingen kartlagt gren i nærheten, så prioriteringsscore "
+                "og elvestrekning ville vært beregnet fra feil/urelatert bekk. Ikke vist under.<br>"
             )
         html += field("Prioriteringsscore (0-100)", row.get("prioriteringsscore"))
         html += field("Oppstrøms elvestrekning som åpnes", row.get("oppstrom_lengde_km"), " km")
@@ -449,7 +449,7 @@ def add_legend(
             f"<div style='margin:2px 0'>"
             f"<span style='display:inline-block;width:12px;height:12px;border-radius:50%;"
             f"border:3px dashed #000;margin-right:6px;vertical-align:middle'></span>"
-            f"Usikker score -- FKB-Vann bekrefter vann her, men elvenett har ingen gren i nærheten</div>"
+            f"Score ikke beregnet -- FKB-Vann bekrefter vann her, men elvenett har ingen gren i nærheten</div>"
         )
 
     legend_html = f"""
