@@ -242,6 +242,13 @@ def add_base_layers(m):
     # aerial photo layer without anyone asking for that). OpenTopoMap is
     # the intended default: a real map style (not a photo), with contour
     # lines/hillshading for terrain.
+    # max_zoom vs. max_native_zoom: OpenTopoMap's own tiles only exist up
+    # to zoom 17, but without max_native_zoom set separately, zooming the
+    # MAP past a layer's max_zoom makes that layer render nothing at all
+    # (blank/grey) rather than just getting blurry -- easy to mistake for
+    # "the background map is broken". Setting max_native_zoom lower than
+    # max_zoom tells Leaflet to keep showing the most detailed real tile,
+    # upscaled, instead of nothing.
     folium.TileLayer(
         tiles="https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
         attr=(
@@ -249,7 +256,8 @@ def add_base_layers(m):
             "Map style: &copy; OpenTopoMap (CC-BY-SA)"
         ),
         name="OpenTopoMap (terreng/høyde)",
-        max_zoom=17,
+        max_zoom=19,
+        max_native_zoom=17,
         overlay=False,
         control=True,
         show=True,
@@ -258,6 +266,7 @@ def add_base_layers(m):
     folium.TileLayer(
         tiles="OpenStreetMap",
         name="OpenStreetMap (vanlig kart)",
+        max_zoom=19,
         overlay=False,
         control=True,
         show=False,
@@ -270,6 +279,8 @@ def add_base_layers(m):
         ),
         attr="Tiles &copy; Esri",
         name="Esri satellittbilde (flyfoto)",
+        max_zoom=19,
+        max_native_zoom=19,
         overlay=False,
         control=True,
         show=False,
@@ -285,35 +296,9 @@ def add_base_layers(m):
         tiles="https://cache.kartverket.no/v1/wmts/1.0.0/topo/default/webmercator/{z}/{y}/{x}.png",
         attr="Kartverket",
         name="Kartverket topografisk (kan trenge oppdatert URL)",
+        max_zoom=19,
+        max_native_zoom=18,
         overlay=False,
-        control=True,
-        show=False,
-    ).add_to(m)
-
-
-def add_fkb_vann_wms_test_layer(m):
-    """EXPERIMENTAL, off by default, known not to work: overlay
-    Kartverket's live FKB-Vann WMS.
-
-    Superseded by add_fkb_vann_layer() below, which draws the real,
-    downloaded FKB-Vann geometry (step 8's data) directly -- more
-    reliable, works offline, and confirmed actually showing data.
-    Kept only in case you want to try fixing the live-WMS approach: the
-    service, its layer name ("Vann"), and its behaviour were originally
-    found via web search, not tested live, and a real run confirmed the
-    layer comes back blank -- check the current GetCapabilities at
-    https://wms.geonorge.no/skwms1/wms.fkb for the right LAYERS value
-    if you want to debug it further.
-    """
-    folium.WmsTileLayer(
-        url="https://wms.geonorge.no/skwms1/wms.fkb",
-        layers="Vann",
-        fmt="image/png",
-        transparent=True,
-        version="1.3.0",
-        attr="Kartverket (FKB-Vann WMS)",
-        name="FKB-Vann (TEST -- live WMS, kjent ikke-fungerende)",
-        overlay=True,
         control=True,
         show=False,
     ).add_to(m)
@@ -552,11 +537,6 @@ def add_natural_felt_layer(m, geojson):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--out", default=str(OUT_HTML), help="Output HTML path (default: %(default)s)")
-    parser.add_argument(
-        "--fkb-wms-test",
-        action="store_true",
-        help="Add an experimental, off-by-default live FKB-Vann WMS overlay for visual comparison (see add_fkb_vann_wms_test_layer)",
-    )
     args = parser.parse_args()
     out_html = Path(args.out)
 
@@ -577,10 +557,8 @@ def main():
     center_lat = df["_map_lat"].mean()
     center_lon = df["_map_lon"].mean()
 
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=11, tiles=None)
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=11, max_zoom=19, tiles=None)
     add_base_layers(m)
-    if args.fkb_wms_test:
-        add_fkb_vann_wms_test_layer(m)
 
     if lake_geojson is not None:
         add_lake_layer(m, lake_geojson)

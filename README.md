@@ -520,16 +520,17 @@ genuine disagreements if you can get it.
 switchable overlay, teal-coloured, next to Elvenett) so you can visually
 compare the two networks and see where either has a stream the other
 doesn't -- this is on top of, not instead of, the numeric check this
-step does. **The live-WMS visual comparison this map used to offer
-(`--fkb-wms-test`) is confirmed not to work** (the "Vann" layer name
-guessed at without a real route to Kartverket's WMS came back blank on
-a real run) -- the local-file overlay replaced it as the reliable way
-to see this. Drawing FKB-Vann's real geometry directly also surfaced an
-important lesson: this data is captured at sub-metre precision, so
-embedding it in the map unsimplified made the HTML file balloon from
-1.7 MB to 28 MB (slow to load, and looked like the map was broken while
-it caught up) -- step 3 now simplifies FKB-Vann's geometry to 2 m
-before embedding it (`FKB_VANN_SIMPLIFY_TOLERANCE_M`), invisible at any
+step does. This map used to also offer a live-WMS visual comparison
+(`--fkb-wms-test`) -- confirmed not to work (the "Vann" layer name,
+guessed at without a real route to Kartverket's WMS, came back blank on
+a real run) -- and it's been removed outright now that the local-file
+overlay above does the same job reliably. Drawing FKB-Vann's real
+geometry directly also surfaced an important lesson: this data is
+captured at sub-metre precision, so embedding it in the map unsimplified
+made the HTML file balloon from 1.7 MB to 28 MB (slow to load, and
+looked like the map was broken while it caught up) -- step 3 now
+simplifies FKB-Vann's geometry to 2 m before embedding it
+(`FKB_VANN_SIMPLIFY_TOLERANCE_M`), invisible at any
 zoom level you'd actually use, bringing the file back down to ~4 MB.
 
 ### Step 9 -- (optional) height profile of a whole vassdrag
@@ -609,6 +610,18 @@ time you view it.
 
 ## Notes and things to check
 
+- **If a background layer (OpenTopoMap, satellite, ...) shows blank/grey:**
+  most likely either no internet connection *in the browser viewing the
+  map* (these are loaded live -- see above), or a network/firewall that
+  blocks the specific tile domains (`tile.opentopomap.org`,
+  `arcgisonline.com`, `tile.openstreetmap.org`, `cache.kartverket.no`) --
+  worth checking on a different network if you're on a locked-down
+  office connection. One real bug this project did have and has fixed:
+  zooming in past a layer's own maximum tile resolution used to make it
+  vanish entirely rather than just get blurry (e.g. OpenTopoMap only has
+  real tiles up to zoom 17) -- `max_native_zoom` is now set on every
+  base layer so it keeps showing the most detailed tile it has, scaled
+  up, instead of going blank past that point.
 - **Kartverket's own topographic layer** is included as an extra,
   switched-off-by-default background option, since it's normally the
   most detailed option for Norway specifically. Public tile-service
