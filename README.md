@@ -29,17 +29,16 @@ It shows:
   upstream habitat -- river length AND lake area -- would open up if
   that one were fixed, relative to the other barriers on the map --
   bigger dot = bigger win). Each dot is snapped onto the nearest mapped
-  stream, instead of the raw (slightly imprecise) field coordinate --
-  and if an FKB-Vann export is present, whichever of Elvenett/FKB-Vann
-  is actually closest to the field coordinate is used, since FKB-Vann is
-  positionally more precise (aerial photogrammetry vs. a generalised
-  network product). This only affects where the dot is *drawn*; the
-  priority score and upstream-habitat figures still come from Elvenett's
-  network graph either way, since FKB-Vann has no equivalent
-  connectivity data for the upstream trace (see step 8). On the real
-  Arendal run, FKB-Vann ended up placing 30 of 44 barrier culverts (more
-  precise than Elvenett at that spot), and the number needing a
-  >50&nbsp;m "check this" flag dropped from 13 to 6 as a result.
+  Elvenett stream (step 4), instead of the raw (slightly imprecise)
+  field coordinate -- and if an FKB-Vann export is given to step 4
+  (on by default), that snap is itself informed by FKB-Vann whenever
+  it's positionally closer to the field coordinate than Elvenett's own
+  line is, since FKB-Vann is more precise (aerial photogrammetry vs. a
+  generalised network product). This is done once, in step 4, and
+  everything downstream -- the dot's position, the coloured trace, and
+  the priority score -- is computed from that one, single corrected
+  point, so they always agree with each other. On the real Arendal run,
+  FKB-Vann informed the snap for 30 of 44 barrier culverts.
 - *(If you ran step 4)* the WHOLE river/stream network from NVE's real
   Elvenett data (not just a picture -- actual line-by-line geometry),
   coloured:
@@ -57,6 +56,11 @@ It shows:
 - A switchable background map, including a terrain/relief layer
   (OpenTopoMap, the default) that shows contour lines and hillshading,
   so you can see slopes and valleys.
+- **The kommune's own administrative boundary**, as a dashed outline
+  (fetched once from Kartverket's Kommuneinfo API, see step 3), so you
+  can see exactly where the kommune -- and so this map's coverage --
+  actually ends, and the map now zooms to fit the whole kommune by
+  default instead of just tightly around the culvert points.
 - *(If you ran step 4 with `--dtm`)* a small triangle icon at every
   spot the river's slope suggests a **natural** barrier (a waterfall or
   rapid too steep for fish regardless of any culvert) -- solid purple
@@ -65,14 +69,23 @@ It shows:
   upstream-habitat colouring, same as another culvert would.
 - *(If you ran step 5)* **lakes**, as NVE's own real lake polygons --
   an actual *area*, not just a line, and real measured data (not
-  estimated). Lakes count for a lot in the priority score too: a lake
-  holds far more fish than the same length of stream, see step 4.
+  estimated), shown filled in blue with their own legend entry. Lakes
+  count for a lot in the priority score too: a lake holds far more fish
+  than the same length of stream, see step 4.
 - *(If an FKB-Vann export is present, see step 8)* **FKB-Vann's own
   river/lake polygons**, teal-coloured, as a separate switchable
   overlay next to Elvenett -- FKB-Vann is positionally more precise but
   isn't a network, so the two datasets are shown side by side rather
   than merged, letting you see at a glance where one has a stream the
   other doesn't.
+- *(If step 4 found any)* a **black dashed ring** around a culvert
+  whose priority score is flagged unreliable: FKB-Vann confirms real
+  water right at the field coordinate, but Elvenett has no network edge
+  anywhere nearby, so the upstream trace was forced onto a distant,
+  probably unrelated stream. 7 of 44 in the current Arendal run -- see
+  step 4's `score_upalitelig` note below. These are excluded from step
+  7's ranked report entirely, since their score number can't be
+  trusted enough to rank by.
 - Click any dot for details: place name, municipality, river/stream
   ("vassdrag"), the biologists' comments, diameter, length, priority
   score, and how many km of river / km2 of lake would open up if that
@@ -172,10 +185,21 @@ Reads whichever processed file exists (plain, with elevation, or with
 the river network from step 4) and writes
 `output/agder_kulvert_kart.html`. Open that file in your browser.
 
+**Kommune boundary outline:** drawn from
+`data/raw/kommunegrense/arendal_4203.geojson`, a one-time fetch from
+Kartverket's free, no-login Kommuneinfo API --
+`https://ws.geonorge.no/kommuneinfo/v1/kommuner/4203/omrade?utkoordsys=4326`
+(4203 is Arendal's kommunenummer; look one up by name at
+`https://ws.geonorge.no/kommuneinfo/v1/sok?knavn=<name>` for another
+kommune). Small (~100 KB) and static -- kommune boundaries essentially
+never change -- so it's just committed to the repo rather than fetched
+on every run. If it's missing, step 3 still works, just without the
+outline layer.
+
 ### Step 4 -- (optional) snap to the real river network + colour it by impact
 
 ```bash
-python scripts/04_koble_til_elvenett.py --river data/raw/nve_elvenett/Elv_Elvenett.shp --kommune Arendal --innsjo data/raw/nve_innsjo/Innsjo_Innsjo.shp
+python scripts/04_koble_til_elvenett.py --river data/raw/nve_elvenett/Elv_Elvenett.shp --kommune Arendal --innsjo data/raw/nve_innsjo/Innsjo_Innsjo.shp --fkb data/raw/fkb_vann/fkb_vann_omrade_arendal.shp
 ```
 
 This is what makes "how much space opens up upstream" possible, and
@@ -189,7 +213,34 @@ where the priority score is worked out. It:
 2. **Snaps** each barrier culvert (in the chosen kommune) onto the
    nearest line in that network -- since the field GPS coordinate can
    be a little off, we assume the culvert is really wherever the
-   closest mapped stream is.
+   closest mapped stream is. **If an FKB-Vann export is given (`--fkb`,
+   on by default, pointing at the file step 8 uses)** and it has a
+   water feature closer to the field coordinate than Elvenett's own
+   line is, that FKB-Vann point -- not the raw field coordinate -- is
+   used to decide *which* Elvenett edge to snap to and *where* along
+   it, since FKB-Vann is positionally more precise (aerial
+   photogrammetry vs. a generalised network product). The culvert still
+   ends up snapped ONTO Elvenett either way (the walk below needs an
+   actual graph edge to start from) -- this only improves the choice of
+   where on it. Crucially, this correction happens *before* the walk,
+   so the snapped point used for the marker, the coloured trace, and
+   the score are always the same point -- unlike layering a
+   separate "prettier position" on top afterwards, which would leave
+   the trace/score computed from a different point than the dot is
+   drawn at. On the real Arendal run, FKB-Vann informed the snap for 30
+   of 44 barrier culverts.
+
+   **Not every case is fixable this way, though.** For 7 of the 44,
+   FKB-Vann confirms real water within 30 m of the field coordinate,
+   but Elvenett has no edge *anywhere* nearby -- correcting the input
+   point can only pick a better *existing* Elvenett edge, it can't
+   invent one where the network simply has a gap. For these, the walk
+   is still forced onto the nearest (possibly 500+ m away, likely
+   unrelated) Elvenett edge, so the resulting `oppstrom_lengde_km` and
+   priority score are probably wrong -- flagged as `score_upalitelig`
+   in the output and excluded from step 7's ranked report, and shown on
+   the map as a culvert with a thick black dashed ring around it,
+   rather than silently presenting a fabricated-looking number.
 3. **Walks upstream** through the network graph from that snapped
    point, collecting every segment that genuinely becomes reachable --
    handling branches/tributaries correctly, without double-counting --
@@ -302,20 +353,20 @@ lengths), but if a river you know well looks reversed on the map
 set `REVERSE_FLOW_DIRECTION = True` near the top of the script and
 re-run. Also check the console output for how many culverts snapped
 more than `SUSPICIOUS_SNAP_DISTANCE_M` (50 m) from any mapped stream
-(13 of 44 in the current Arendal run) -- those are worth a manual look
-(either a coordinate error, or the culvert is on a stream too small for
-Elvenett to include). **Step 3 draws these on the map too:** a dashed
-line from the original field coordinate to the point actually used,
-with a small white/black dot marking the original -- so a coordinate
-that lands in the middle of a lake, or nowhere near any mapped stream,
-is immediately visible instead of silently trusted. Only shown beyond
-50 m (`SNAP_WARNING_DISTANCE_M` in `scripts/03_lag_kart.py`) since a
-few metres of GPS noise is normal and not worth flagging. This 13-of-44
-figure is Elvenett alone, from this step -- step 3's own version of this
-warning uses whichever of Elvenett/FKB-Vann the marker actually ended up
-placed at (see step 3), so on the real Arendal run only 6 of 44 still
-show the warning on the map, the other 7 having been rescued by a closer
-FKB-Vann match.
+even after the FKB-Vann-informed correction above (13 of 44 in the
+current Arendal run) -- those are worth a manual look (either a
+coordinate error, or the culvert is on a stream too small for either
+Elvenett or FKB-Vann to include). 7 of those 13 have FKB-Vann
+confirming real water right at the field point with no nearby Elvenett
+edge at all -- those are the `score_upalitelig` ones (see above), a
+genuine Elvenett network gap, not something snapping logic alone can
+fix. **Step 3 draws all 13 on the map too:** a dashed line from the
+original field coordinate to the point actually used, with a small
+white/black dot marking the original -- so a coordinate that lands in
+the middle of a lake, or nowhere near any mapped stream, is immediately
+visible instead of silently trusted. Only shown beyond 50 m
+(`SNAP_WARNING_DISTANCE_M` in `scripts/03_lag_kart.py`) since a few
+metres of GPS noise is normal and not worth flagging.
 
 ### Step 5 -- (optional) add the lake layer to the map
 
@@ -422,6 +473,16 @@ rounded to 2 decimals throughout), the field comments, and a
 pipe", "build a gentle ramp/threshold so fish don't have to jump".
 That suggestion is picked in order of how reliable the source is:
 
+**Culverts flagged `score_upalitelig` by step 4 are excluded from the
+ranking** -- FKB-Vann confirms real water at those field coordinates,
+but Elvenett has no network edge anywhere nearby, so their priority
+score is probably computed from the wrong, unrelated stream (see step
+4). Ranking a "fix this first" list by a number known to be unreliable
+would be worse than not ranking it at all. They're still real, mapped
+barriers -- just not sorted here -- and the report's summary section
+names them explicitly so nothing is silently dropped. 7 of 44 in the
+current Arendal run.
+
 1. The biologists' own `type_tiltak` field from step 6 ("Lett rensk",
    "Mindre utbedring", "Omfattende utbedring", ...), when present --
    this is a professional's own classification, so it's used as-is.
@@ -468,18 +529,22 @@ hydrography layer -- captured by aerial photogrammetry, so it's
 positionally more precise than Elvenett, but it's a cartographic
 dataset, not a connected network graph with flow direction the way
 Elvenett is. So it can't replace Elvenett for the upstream trace in
-step 4 -- it can only *check* it.
+step 4 -- it can only *check* it (and, as of the change described in
+step 4, also *correct which Elvenett point gets used*, though the
+network structure itself always still comes from Elvenett).
 
-This script doesn't change the network, the map, or the priority score.
-For every barrier culvert it measures how far the field coordinate (and
-separately, the point step 4 already snapped to on Elvenett) is from
-the nearest FKB-Vann water feature, and flags any culvert where the two
-datasets disagree by more than 15 m at the point already in use --
-worth a field look, and a likely explanation for some of the 13
-culverts step 4 already flags as snapping far from Elvenett. Results go
-to `data/processed/kulvert_fkb_sjekk.csv`. Since a real export can cover
-a much bigger area than one kommune, the script reads only a buffered
-box around the culverts being checked, rather than the whole file.
+**This script itself doesn't change the network, the map, or the
+priority score** -- it's a read-only diagnostic (step 4 is a separate
+script that now uses this same FKB-Vann file for real, see above). For
+every barrier culvert it measures how far the field coordinate (and
+separately, the point step 4 snapped to) is from the nearest FKB-Vann
+water feature, and flags any culvert where the two datasets disagree by
+more than 15 m at the point already in use -- worth a field look, and a
+likely explanation for some of the culverts step 4 flags as snapping
+far from any mapped stream. Results go to
+`data/processed/kulvert_fkb_sjekk.csv`. Since a real export can cover a
+much bigger area than one kommune, the script reads only a buffered box
+around the culverts being checked, rather than the whole file.
 
 **Where to get FKB-Vann:** Kartverket's national base map layer,
 distributed through Geonorge (`nedlasting.geonorge.no`, needs a free
@@ -607,7 +672,7 @@ just confirms the mechanics are sound.
 pip install -r requirements.txt
 python scripts/01_rens_kulvertdata.py
 python scripts/02_hent_hoydedata.py       # optional, needs internet, can take a while
-python scripts/04_koble_til_elvenett.py --river data/raw/nve_elvenett/Elv_Elvenett.shp --kommune Arendal --innsjo data/raw/nve_innsjo/Innsjo_Innsjo.shp
+python scripts/04_koble_til_elvenett.py --river data/raw/nve_elvenett/Elv_Elvenett.shp --kommune Arendal --innsjo data/raw/nve_innsjo/Innsjo_Innsjo.shp --fkb data/raw/fkb_vann/fkb_vann_omrade_arendal.shp
 python scripts/05_legg_til_innsjoer.py    # optional, lake map layer
 python scripts/06_legg_til_feltdata.py --kommune Arendal   # optional, real field-assessment data
 python scripts/03_lag_kart.py
@@ -718,9 +783,10 @@ time you view it.
 data/raw/                   source data, exported from Excel (small, no photos)
 data/raw/nve_elvenett/      NVE Elvenett river network shapefile for the current kommune (step 4)
 data/raw/nve_innsjo/        NVE lake polygons (step 4 scoring + step 5 map layer)
-data/raw/fkb_vann/          FKB-Vann export, clipped to Arendal (step 8 cross-check)
+data/raw/fkb_vann/          FKB-Vann export, clipped to Arendal (step 4 snapping + step 8 cross-check + step 3 map layer)
+data/raw/kommunegrense/     Arendal's administrative boundary, from Kartverket's Kommuneinfo API (step 3 outline)
 data/processed/             cleaned CSV/GeoJSON + coloured river network + lakes + field data (generated by scripts)
-scripts/                    the seven pipeline steps, run in order
+scripts/                    the ten pipeline steps, run in order
 output/                     the final map (agder_kulvert_kart.html) + the prioritisation report (prioriteringsrapport.docx)
 ```
 

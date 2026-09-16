@@ -141,7 +141,17 @@ def add_kv_table(doc, rows):
 
 
 def build_report(culverts, kommune, top_n):
-    top = culverts.sort_values("prioriteringsscore", ascending=False).head(top_n).copy()
+    # Culverts flagged score_upalitelig (see step 4: FKB-Vann confirms
+    # real water at the field point, but Elvenett has no edge anywhere
+    # nearby, so the trace was forced onto a distant, likely unrelated
+    # stream) are excluded from the ranked list -- their score number is
+    # not trustworthy enough to sort a "fix this first" recommendation
+    # by, even though the culvert itself is still a real, mapped barrier.
+    has_unreliable_col = "score_upalitelig" in culverts.columns
+    unreliable = culverts[culverts["score_upalitelig"]] if has_unreliable_col else culverts.iloc[0:0]
+    rankable = culverts[~culverts["score_upalitelig"]] if has_unreliable_col else culverts
+
+    top = rankable.sort_values("prioriteringsscore", ascending=False).head(top_n).copy()
     top["_action"], top["_action_source"] = zip(*top.apply(suggest_action, axis=1))
 
     doc = Document()
@@ -181,6 +191,15 @@ def build_report(culverts, kommune, top_n):
         "mellom dem, kan tallene deres delvis overlappe -- summen over er en indikasjon, ikke et "
         "eksakt systemtotal."
     ).runs[0].italic = True
+    if len(unreliable) > 0:
+        doc.add_paragraph(
+            f"{len(unreliable)} vandringshinder er utelatt fra rangeringen under: FKB-Vann "
+            f"bekrefter vann ved feltkoordinaten, men elvenett har ingen kartlagt gren i "
+            f"nærheten, så prioriteringsscore for disse er trolig beregnet fra feil/urelatert "
+            f"bekk og ikke pålitelig nok til å rangere etter. De er fortsatt reelle, kartlagte "
+            f"vandringshinder -- bare ikke rangert her. Berørte steder: "
+            + ", ".join(fmt(s) for s in unreliable["stedsnavn"].tolist()) + "."
+        ).runs[0].italic = True
 
     add_heading(doc, f"Topp {len(top)} -- anbefalt prioritert rekkefølge", level=1)
     table = doc.add_table(rows=1, cols=6)

@@ -15,7 +15,16 @@ to the side of the actual stream. So instead we:
      river/stream map data NVE itself uses. Unlike the background map
      tiles from step 3, this is real *line geometry* (actual coordinates
      for every stream/river), which lets us do real spatial analysis.
-  2. "Snap" each culvert to the closest point on that river network.
+  2. "Snap" each culvert to the closest point on that river network --
+     if an FKB-Vann export is given (--fkb, on by default), and a
+     culvert's field coordinate sits closer to an FKB-Vann water feature
+     than to any Elvenett line, FKB-Vann's nearer, more precise point is
+     used to decide WHICH Elvenett edge (and where along it) to snap to,
+     instead of the raw field coordinate. The culvert still ends up
+     snapped onto Elvenett either way -- only the CHOICE of where on it
+     improves -- so the marker position, the upstream trace, the
+     coloured river, and the priority score all stay consistent with
+     each other; nothing downstream needs to know FKB-Vann was involved.
   3. Walk UPSTREAM through the river network graph from that snapped
      point, collecting every stream segment that eventually flows
      into it -- but STOP walking further up any branch as soon as we
@@ -159,6 +168,16 @@ NODE_SNAP_TOLERANCE_M = 1.0
 # probably not actually matched to the right stream -- we still snap
 # it (nothing better to do), but flag it so you can review it.
 SUSPICIOUS_SNAP_DISTANCE_M = 50.0
+
+# If FKB-Vann confirms real water within this distance of the field
+# coordinate, but the culvert is STILL snapped more than
+# SUSPICIOUS_SNAP_DISTANCE_M away (because Elvenett simply has no edge
+# anywhere nearby -- FKB-Vann-informed input correction can only pick a
+# better EXISTING Elvenett edge, it can't invent one where there isn't
+# one), the upstream trace and priority score for that culvert are
+# probably being computed from the wrong, unrelated stream -- flagged as
+# `score_upalitelig` so this doesn't get silently trusted.
+FKB_CONFIRMS_WATER_DISTANCE_M = 30.0
 
 # Natural-barrier screening: gradient smoothed over this many metres of
 # river (roughly half upstream, half downstream of each point), and the
@@ -450,6 +469,21 @@ def main():
         default=str(ROOT / "data" / "raw" / "nve_innsjo" / "Innsjo_Innsjo.shp"),
         help="Path to NVE's Innsjo (lake) shapefile, used to factor lake area into the priority score",
     )
+    parser.add_argument(
+        "--fkb",
+        default=str(ROOT / "data" / "raw" / "fkb_vann" / "fkb_vann_omrade_arendal.shp"),
+        help=(
+            "Path to an FKB-Vann export (see step 8). When a culvert's field coordinate sits "
+            "closer to an FKB-Vann water feature than to any Elvenett line, that FKB-Vann point "
+            "is used as the snap INPUT instead of the raw field coordinate -- FKB-Vann is "
+            "positionally more precise (aerial photogrammetry vs. a generalised network product), "
+            "so this gives a better-informed choice of which Elvenett edge to snap to and where "
+            "along it. The culvert still ends up snapped ONTO Elvenett either way (needed for the "
+            "upstream graph walk) -- this only improves which point on that network gets picked, "
+            "so the marker position, the coloured trace, and the priority score all stay "
+            "consistent with each other. Pass an empty string to disable."
+        ),
+    )
     args = parser.parse_args()
 
     river_path = Path(args.river)
@@ -513,6 +547,56 @@ def main():
     )
     nearest = nearest[~nearest.index.duplicated(keep="first")]  # exact ties -> keep first
 
+    # FKB-Vann-informed correction: if a culvert's field coordinate sits
+    # closer to an FKB-Vann water feature than to any Elvenett line, use
+    # FKB-Vann's nearest point -- not the raw field coordinate -- as the
+    # input for picking which Elvenett edge to snap to. FKB-Vann is
+    # positionally more precise, so this fixes cases where the raw GPS
+    # point was ambiguous between two nearby streams. The culvert still
+    # ends up snapped ONTO Elvenett (needed for the graph walk below);
+    # this only improves which edge/point on it gets chosen.
+    snap_source = culvert_points.geometry.copy()
+    snap_kilde = pd.Series("Elvenett", index=culvert_points.index)
+    fkb_avstand_felt = pd.Series(float("nan"), index=culvert_points.index)
+
+    fkb = None
+    if args.fkb:
+        fkb_path = Path(args.fkb)
+        if fkb_path.exists():
+            print(f"Reading FKB-Vann from {fkb_path} ...")
+            fkb = gpd.read_file(fkb_path).to_crs(WORK_CRS)
+            if "objtype" in fkb.columns:
+                fkb = fkb[fkb["objtype"] != "Havflate"]
+            print(f"  {len(fkb)} water feature(s) (sea excluded)")
+        else:
+            print(f"No FKB-Vann file found at {fkb_path} -- skipping FKB-Vann-informed snapping")
+
+    if fkb is not None and len(fkb) > 0:
+        from shapely.ops import nearest_points
+
+        print("Checking whether FKB-Vann gives a better snap point than the raw field coordinate ...")
+        for i, row in culvert_points.iterrows():
+            felt_pt = row.geometry
+            elvenett_dist = float(nearest.loc[i, "snap_avstand_m"])
+            dists = fkb.geometry.distance(felt_pt)
+            idx = dists.idxmin()
+            fkb_dist = float(dists.loc[idx])
+            fkb_avstand_felt.loc[i] = fkb_dist
+            if fkb_dist < elvenett_dist:
+                _, nearest_pt = nearest_points(felt_pt, fkb.geometry.loc[idx])
+                snap_source.loc[i] = nearest_pt
+                snap_kilde.loc[i] = "FKB-Vann"
+
+        corrected_idx = snap_kilde[snap_kilde == "FKB-Vann"].index
+        print(f"  {len(corrected_idx)} of {len(culvert_points)} culvert(s) will snap via an FKB-Vann-corrected point")
+        if len(corrected_idx) > 0:
+            corrected_points = gpd.GeoDataFrame(geometry=snap_source.loc[corrected_idx], crs=WORK_CRS)
+            nearest_corrected = gpd.sjoin_nearest(
+                corrected_points, rivers[["geometry"]], distance_col="snap_avstand_m_korrigert", how="left"
+            )
+            nearest_corrected = nearest_corrected[~nearest_corrected.index.duplicated(keep="first")]
+            nearest.loc[corrected_idx, "index_right"] = nearest_corrected["index_right"]
+
     natural_cut_by_edge = {}
     elevation_at, cleanup_elevation = None, None
     if args.dtm:
@@ -547,7 +631,11 @@ def main():
     for i, row in culvert_points.iterrows():
         river_idx = int(nearest.loc[i, "index_right"])
         geom = rivers.geometry.iloc[river_idx]
-        proj_dist = geom.project(row.geometry)
+        # Project the snap SOURCE point (the FKB-Vann-corrected point when
+        # applicable, otherwise the raw field point) -- not always the raw
+        # field point -- so a corrected culvert lands at the spot along
+        # this edge nearest its true (FKB-informed) position.
+        proj_dist = geom.project(snap_source.loc[i])
         snap_edge[i] = river_idx
         snap_proj[i] = proj_dist
         if row["barrier_category"] == "Absolutt":
@@ -622,11 +710,21 @@ def main():
         snap_lon.append(snapped_wgs84.x)
         snap_lat.append(snapped_wgs84.y)
         upstream_km.append(total_length_m / 1000)
-        snap_dist_out.append(float(nearest.loc[i, "snap_avstand_m"]))
+        # The distance that actually matters for "how far is the marker
+        # from where the surveyor stood": from the ORIGINAL field point
+        # to the final snapped point -- not the (possibly smaller, FKB-
+        # Vann-corrected-point-to-edge) distance used to pick the edge.
+        snap_dist_out.append(float(row.geometry.distance(snapped_point)))
 
     culverts["lon_snappet"] = snap_lon
     culverts["lat_snappet"] = snap_lat
     culverts["snap_avstand_m"] = snap_dist_out
+    culverts["snap_kilde"] = snap_kilde.values
+    culverts["fkb_avstand_felt_m"] = fkb_avstand_felt.values
+    culverts["score_upalitelig"] = (
+        (culverts["fkb_avstand_felt_m"] < FKB_CONFIRMS_WATER_DISTANCE_M)
+        & (culverts["snap_avstand_m"] > SUSPICIOUS_SNAP_DISTANCE_M)
+    )
     culverts["oppstrom_lengde_km"] = upstream_km
     culverts["oppstrom_innsjo_km2"] = upstream_lake_km2
 
@@ -646,6 +744,14 @@ def main():
     n_suspicious = (culverts["snap_avstand_m"] > SUSPICIOUS_SNAP_DISTANCE_M).sum()
     print(f"\n{n_suspicious} culverts snapped more than {SUSPICIOUS_SNAP_DISTANCE_M} m "
           f"away from their nearest river line -- worth a manual look.")
+    n_unreliable = int(culverts["score_upalitelig"].sum())
+    if n_unreliable:
+        print(
+            f"  {n_unreliable} of those have FKB-Vann confirming real water within "
+            f"{FKB_CONFIRMS_WATER_DISTANCE_M:.0f} m of the field point, but Elvenett has no "
+            f"edge anywhere nearby -- their upstream trace/score is likely computed from the "
+            f"wrong, unrelated stream (flagged as score_upalitelig=True in the output)."
+        )
     print(f"Median upstream length unlocked: {culverts['oppstrom_lengde_km'].median():.2f} km")
     if lakes is not None:
         n_with_lake = (culverts["oppstrom_innsjo_km2"] > 0).sum()
