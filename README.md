@@ -622,6 +622,23 @@ time you view it.
   real tiles up to zoom 17) -- `max_native_zoom` is now set on every
   base layer so it keeps showing the most detailed tile it has, scaled
   up, instead of going blank past that point.
+- **Elvenett rivers sometimes stop abruptly, with nothing mapped further
+  upstream.** Checked directly against the data: Arendal's Elvenett
+  network has 247 dangling (dead-end) line endpoints. Cross-referencing
+  each against FKB-Vann's coverage, 211 of the 247 aren't near *any*
+  FKB-Vann polygon either (median distance 370 m) -- meaning even
+  Kartverket's more detailed dataset doesn't map a stream any further
+  there, so these are almost certainly genuine headwater termini (small
+  streams too narrow for either official dataset to capture), not a bug
+  in this project. The other 36 of 247 do sit within 10 m of an FKB-Vann
+  polygon, so FKB-Vann may have a bit more detail there than Elvenett's
+  line reaches -- visible on the map by comparing the FKB-Vann overlay
+  (step 8/3) against Elvenett at those spots. Splicing FKB-Vann directly
+  into the upstream-trace graph (so the red/orange colouring would
+  continue past these gaps) was considered and deliberately not done --
+  FKB-Vann carries no flow-direction/connectivity data, so building a
+  reliable network out of it is a real engineering effort with real risk
+  of introducing subtle errors, not a quick fix.
 - **Kartverket's own topographic layer** is included as an extra,
   switched-off-by-default background option, since it's normally the
   most detailed option for Norway specifically. Public tile-service
