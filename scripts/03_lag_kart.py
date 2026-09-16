@@ -44,6 +44,12 @@ What ends up on the map
 
 * If you ran step 5: NVE's real lake polygons, as an actual area layer.
 
+* If an FKB-Vann export is present (see step 8): its river/lake
+  polygons, drawn in a distinct colour as its own switchable overlay,
+  on top of/next to Elvenett -- so the two datasets can be visually
+  compared and supplement each other (a stream one has that the other
+  doesn't is visible just by looking).
+
 * If you ran step 4: a dashed line + small white/black dot for any
   culvert whose original field coordinate sits more than
   `SNAP_WARNING_DISTANCE_M` (50 m) from the mapped stream it got
@@ -78,7 +84,19 @@ IN_GEOJSON_RIVERS = ROOT / "data" / "processed" / "elvenett_farget.geojson"
 IN_GEOJSON_NATURAL = ROOT / "data" / "processed" / "naturlige_hindre.geojson"
 IN_GEOJSON_NATURAL_FELT = ROOT / "data" / "processed" / "naturlige_hindre_felt.geojson"
 IN_GEOJSON_LAKES = ROOT / "data" / "processed" / "innsjoer.geojson"
+IN_FKB_VANN_SHP = ROOT / "data" / "raw" / "fkb_vann" / "fkb_vann_omrade_arendal.shp"
 OUT_HTML = ROOT / "output" / "agder_kulvert_kart.html"
+
+FKB_VANN_COLOR = "#00838f"
+
+# FKB-Vann is captured by aerial photogrammetry at sub-metre precision,
+# which is far more detail than a web map needs (and makes for a huge,
+# slow-to-load HTML file if embedded as-is -- ~370,000 vertices for
+# Arendal's ~1,500 polygons, unsimplified). Simplify to this tolerance
+# (metres, in the file's own projected CRS) before embedding -- visually
+# indistinguishable at any zoom level you'd actually view this map at,
+# roughly a 10x reduction in point count.
+FKB_VANN_SIMPLIFY_TOLERANCE_M = 2.0
 
 NATURAL_TIER_LABELS = {
     "sikker": "Sannsynlig naturlig vandringshinder (modellert)",
@@ -134,6 +152,26 @@ def load_geojson(path):
         return None
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def load_fkb_vann_geojson():
+    """Load the local FKB-Vann export (step 8's data) as its own map
+    layer, reprojected to lon/lat -- Kartverket's more detailed
+    hydrography, drawn as real geometry rather than a live WMS picture.
+    Sea ("Havflate") is dropped since it isn't river/lake fish-passage
+    habitat. Returns None if the file isn't there (it's optional)."""
+    if not IN_FKB_VANN_SHP.exists():
+        return None
+    import geopandas as gpd
+
+    gdf = gpd.read_file(IN_FKB_VANN_SHP)
+    if "objtype" in gdf.columns:
+        gdf = gdf[gdf["objtype"] != "Havflate"]
+    keep_cols = [c for c in ["objtype"] if c in gdf.columns] + ["geometry"]
+    gdf = gdf[keep_cols]
+    gdf["geometry"] = gdf.geometry.simplify(FKB_VANN_SIMPLIFY_TOLERANCE_M, preserve_topology=True)
+    gdf = gdf.to_crs("EPSG:4326")
+    return json.loads(gdf.to_json())
 
 
 def marker_position(row, has_snap):
@@ -254,24 +292,18 @@ def add_base_layers(m):
 
 
 def add_fkb_vann_wms_test_layer(m):
-    """EXPERIMENTAL, off by default: overlay Kartverket's live FKB-Vann WMS.
+    """EXPERIMENTAL, off by default, known not to work: overlay
+    Kartverket's live FKB-Vann WMS.
 
-    This is not the same thing as scripts/08_sjekk_fkb_vann.py -- that
-    script does an actual position comparison against a downloaded
-    FKB-Vann file. This is just a quick visual check: it asks Kartverket's
-    public FKB WMS service, live, for map tiles of the water layer, so
-    you can eyeball how FKB-Vann's stream lines compare to the
-    Elvenett network already drawn on this map, with no download and no
-    processing at all.
-
-    Needs an internet connection *in the browser viewing the map* (same
-    as the other background layers) -- this script itself doesn't fetch
-    anything. The service, its layer name ("Vann"), and its behaviour
-    were found via web search, not tested live (this project's build
-    environment has no route to Kartverket's WMS servers) -- if the
-    layer comes back blank, check the current GetCapabilities at
+    Superseded by add_fkb_vann_layer() below, which draws the real,
+    downloaded FKB-Vann geometry (step 8's data) directly -- more
+    reliable, works offline, and confirmed actually showing data.
+    Kept only in case you want to try fixing the live-WMS approach: the
+    service, its layer name ("Vann"), and its behaviour were originally
+    found via web search, not tested live, and a real run confirmed the
+    layer comes back blank -- check the current GetCapabilities at
     https://wms.geonorge.no/skwms1/wms.fkb for the right LAYERS value
-    and fix it here.
+    if you want to debug it further.
     """
     folium.WmsTileLayer(
         url="https://wms.geonorge.no/skwms1/wms.fkb",
@@ -280,14 +312,36 @@ def add_fkb_vann_wms_test_layer(m):
         transparent=True,
         version="1.3.0",
         attr="Kartverket (FKB-Vann WMS)",
-        name="FKB-Vann (TEST -- live WMS, sammenlign med elvenett)",
+        name="FKB-Vann (TEST -- live WMS, kjent ikke-fungerende)",
         overlay=True,
         control=True,
         show=False,
     ).add_to(m)
 
 
-def add_legend(m, has_rivers, has_score, has_natural, has_natural_felt, has_snap_warning):
+def add_fkb_vann_layer(m, geojson):
+    """FKB-Vann (Kartverket's detailed hydrography, more precise than
+    Elvenett -- see step 8) drawn as its own overlay, in a colour
+    distinct from Elvenett/lakes, so the two datasets can be visually
+    compared and supplement each other: a stream FKB-Vann has that
+    Elvenett doesn't (or vice versa) is visible just by looking, without
+    either dataset hiding the other."""
+    group = folium.FeatureGroup(name="FKB-Vann (elv/innsjø, mer detaljert)", show=True)
+    fields = [f for f in ["objtype"] if geojson["features"] and f in geojson["features"][0]["properties"]]
+    folium.GeoJson(
+        geojson,
+        style_function=lambda feature: {
+            "color": FKB_VANN_COLOR,
+            "weight": 2,
+            "fillColor": FKB_VANN_COLOR,
+            "fillOpacity": 0.2,
+        },
+        tooltip=folium.GeoJsonTooltip(fields=fields, aliases=["FKB-Vann type:"]) if fields else None,
+    ).add_to(group)
+    group.add_to(m)
+
+
+def add_legend(m, has_rivers, has_score, has_natural, has_natural_felt, has_snap_warning, has_fkb_vann=False):
     rows = ""
     if has_score:
         rows += (
@@ -314,6 +368,13 @@ def add_legend(m, has_rivers, has_score, has_natural, has_natural_felt, has_snap
                 f"background:{color};margin-right:6px;vertical-align:middle'></span>"
                 f"{label}</div>"
             )
+    if has_fkb_vann:
+        rows += (
+            f"<div style='margin:2px 0'>"
+            f"<span style='display:inline-block;width:16px;height:3px;"
+            f"background:{FKB_VANN_COLOR};margin-right:6px;vertical-align:middle'></span>"
+            f"FKB-Vann (elv/innsjø, mer detaljert enn elvenett)</div>"
+        )
     if has_natural:
         for tier, label in NATURAL_TIER_LABELS.items():
             color = NATURAL_TIER_COLORS[tier]
@@ -508,6 +569,7 @@ def main():
     natural_geojson = load_geojson(IN_GEOJSON_NATURAL)
     natural_felt_geojson = load_geojson(IN_GEOJSON_NATURAL_FELT)
     lake_geojson = load_geojson(IN_GEOJSON_LAKES)
+    fkb_vann_geojson = load_fkb_vann_geojson()
 
     positions = df.apply(lambda r: marker_position(r, has_snap), axis=1, result_type="expand")
     df["_map_lat"], df["_map_lon"] = positions[0], positions[1]
@@ -531,6 +593,13 @@ def main():
     else:
         print("(no data/processed/elvenett_farget.geojson found -- run")
         print(" scripts/04_koble_til_elvenett.py to add the coloured river network)")
+
+    if fkb_vann_geojson is not None:
+        add_fkb_vann_layer(m, fkb_vann_geojson)
+        print(f"Added FKB-Vann layer ({len(fkb_vann_geojson['features'])} features from {IN_FKB_VANN_SHP.name})")
+    else:
+        print(f"(no {IN_FKB_VANN_SHP} found -- place an FKB-Vann export")
+        print(" (same file scripts/08_sjekk_fkb_vann.py uses) there to show it on the map)")
 
     if natural_geojson is not None and natural_geojson["features"]:
         add_natural_barrier_layer(m, natural_geojson)
@@ -574,6 +643,7 @@ def main():
         natural_geojson is not None and bool(natural_geojson["features"]),
         natural_felt_geojson is not None and bool(natural_felt_geojson["features"]),
         n_flagged > 0,
+        fkb_vann_geojson is not None,
     )
     folium.LayerControl(collapsed=False).add_to(m)
 

@@ -57,6 +57,12 @@ It shows:
   an actual *area*, not just a line, and real measured data (not
   estimated). Lakes count for a lot in the priority score too: a lake
   holds far more fish than the same length of stream, see step 4.
+- *(If an FKB-Vann export is present, see step 8)* **FKB-Vann's own
+  river/lake polygons**, teal-coloured, as a separate switchable
+  overlay next to Elvenett -- FKB-Vann is positionally more precise but
+  isn't a network, so the two datasets are shown side by side rather
+  than merged, letting you see at a glance where one has a stream the
+  other doesn't.
 - Click any dot for details: place name, municipality, river/stream
   ("vassdrag"), the biologists' comments, diameter, length, priority
   score, and how many km of river / km2 of lake would open up if that
@@ -508,6 +514,23 @@ because the nearest river/lake polygon really was that far away. Treat
 flags from this file with that in mind; the `linje` variant (streams of
 every size, not just wide rivers) would be a more reliable source of
 genuine disagreements if you can get it.
+
+**FKB-Vann is also drawn directly on the map** (step 3 auto-detects
+`data/raw/fkb_vann/fkb_vann_omrade_arendal.shp` and adds it as its own
+switchable overlay, teal-coloured, next to Elvenett) so you can visually
+compare the two networks and see where either has a stream the other
+doesn't -- this is on top of, not instead of, the numeric check this
+step does. **The live-WMS visual comparison this map used to offer
+(`--fkb-wms-test`) is confirmed not to work** (the "Vann" layer name
+guessed at without a real route to Kartverket's WMS came back blank on
+a real run) -- the local-file overlay replaced it as the reliable way
+to see this. Drawing FKB-Vann's real geometry directly also surfaced an
+important lesson: this data is captured at sub-metre precision, so
+embedding it in the map unsimplified made the HTML file balloon from
+1.7 MB to 28 MB (slow to load, and looked like the map was broken while
+it caught up) -- step 3 now simplifies FKB-Vann's geometry to 2 m
+before embedding it (`FKB_VANN_SIMPLIFY_TOLERANCE_M`), invisible at any
+zoom level you'd actually use, bringing the file back down to ~4 MB.
 
 ### Step 9 -- (optional) height profile of a whole vassdrag
 
