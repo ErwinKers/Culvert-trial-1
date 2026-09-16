@@ -435,8 +435,12 @@ it for anything official.
 ### Step 8 -- (optional) cross-check against FKB-Vann
 
 ```bash
-python scripts/08_sjekk_fkb_vann.py --fkb path/to/fkb_vann_export.shp --kommune Arendal
+python scripts/08_sjekk_fkb_vann.py --fkb data/raw/fkb_vann/fkb_vann_omrade_arendal.shp --kommune Arendal
 ```
+
+A ready-made Arendal-clipped export is already included at that path
+(see "Now run and validated..." below) -- pass your own `--fkb` file
+instead if you have a different/newer export.
 
 **FKB-Vann** (Felles KartdataBase -- Vann) is Kartverket's detailed
 hydrography layer -- captured by aerial photogrammetry, so it's
@@ -448,11 +452,13 @@ step 4 -- it can only *check* it.
 This script doesn't change the network, the map, or the priority score.
 For every barrier culvert it measures how far the field coordinate (and
 separately, the point step 4 already snapped to on Elvenett) is from
-the nearest FKB-Vann stream line, and flags any culvert where the two
+the nearest FKB-Vann water feature, and flags any culvert where the two
 datasets disagree by more than 15 m at the point already in use --
 worth a field look, and a likely explanation for some of the 13
 culverts step 4 already flags as snapping far from Elvenett. Results go
-to `data/processed/kulvert_fkb_sjekk.csv`.
+to `data/processed/kulvert_fkb_sjekk.csv`. Since a real export can cover
+a much bigger area than one kommune, the script reads only a buffered
+box around the culverts being checked, rather than the whole file.
 
 **Where to get FKB-Vann:** Kartverket's national base map layer,
 distributed through Geonorge (`nedlasting.geonorge.no`, needs a free
@@ -460,16 +466,48 @@ GeoID login) as SOSI/GML/shapefile per kommune, or via a regional portal
 like Agder's own [agderkart.no](https://agderkart.no/agderkart). Get
 the export for Arendal and pass its path with `--fkb`.
 
-**This script's object-type filtering hasn't been run against a real
-FKB-Vann export** -- there was no route to Geonorge/Agderkart from the
-sandbox this was written in, only a synthetic test file, so the column
-detection is deliberately defensive: it looks for an object-type column
-(commonly `objtype`) to keep only stream/canal centrelines (`ElvBekk`,
-`Kanal`) and exclude polygon-edge types (`...Kant`), but falls back to
-"use every line in the file" with a clear console warning if that
-column isn't where expected. If it guesses wrong on your actual file,
-the printed column names and object-type values make it straightforward
-to fix.
+**Now run and validated against a real Kartverket/Geonorge export** --
+a whole-Agder `område` (polygon/area) delivery, `fkb_vann_omrade`
+(55,727 features: `Elv` river polygons, `Innsjø` lake polygons,
+`Havflate` sea, excluded). The script auto-detects this variant and
+compares distance to the nearest polygon instead of the nearest line
+(0 if the point already falls inside one). It also still supports the
+`linje` (centreline) delivery this was originally written for, though
+that variant itself hasn't been run against a real export -- the
+column/geometry detection is defensive either way: it looks for an
+object-type column (commonly `objtype`) to keep only real water
+features, but falls back to "use every feature of the matching
+geometry type" with a clear console warning if that column isn't where
+expected. If it guesses wrong on your actual file, the printed column
+names and object-type values make it straightforward to fix.
+
+The whole-Agder file was clipped down to a ~34 x 27 km box around
+Arendal's culverts (`data/raw/fkb_vann/fkb_vann_omrade_arendal.shp`,
+1,756 features) and that's what's committed to the repo, the same
+kommune-scoped pattern as `data/raw/nve_elvenett/` and
+`data/raw/nve_innsjo/` -- the full county file is ~550 MB, far too big
+to check in (and the script only ever reads a small bounding box out of
+whatever file you point it at anyway). On the real Arendal run: 19 of
+44 barrier culverts were flagged as disagreeing with FKB-Vann by more
+than 15 m at the point Elvenett snapped to -- but per the caveat above,
+most of those are on streams too narrow for the `område` polygon
+product to represent at all (confirmed by inspection: several flagged
+culverts have a near-perfect Elvenett snap distance, under 10 m, with
+the nearest actual FKB polygon 600-1000+ m away), not genuine
+disagreements about where a mapped stream sits.
+
+**Caveat found from the real run, specific to the `område` variant:**
+FKB-Vann only digitizes a river as a polygon once it's wide enough --
+narrow streams have no `Elv`/`Innsjø` polygon at all in this product
+(only in the `linje` delivery). So a big disagreement number from an
+`område`-type file often just means "no comparable FKB-Vann polygon
+nearby," not a real positional conflict -- confirmed on the real
+Arendal run, where several culverts with a near-perfect Elvenett snap
+(under 10 m) still showed 400-1000+ m FKB "disagreements" simply
+because the nearest river/lake polygon really was that far away. Treat
+flags from this file with that in mind; the `linje` variant (streams of
+every size, not just wide rivers) would be a more reliable source of
+genuine disagreements if you can get it.
 
 ### Step 9 -- (optional) height profile of a whole vassdrag
 
@@ -610,6 +648,7 @@ time you view it.
 data/raw/                   source data, exported from Excel (small, no photos)
 data/raw/nve_elvenett/      NVE Elvenett river network shapefile for the current kommune (step 4)
 data/raw/nve_innsjo/        NVE lake polygons (step 4 scoring + step 5 map layer)
+data/raw/fkb_vann/          FKB-Vann export, clipped to Arendal (step 8 cross-check)
 data/processed/             cleaned CSV/GeoJSON + coloured river network + lakes + field data (generated by scripts)
 scripts/                    the seven pipeline steps, run in order
 output/                     the final map (agder_kulvert_kart.html) + the prioritisation report (prioriteringsrapport.docx)

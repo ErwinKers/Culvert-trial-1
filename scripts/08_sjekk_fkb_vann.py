@@ -36,23 +36,58 @@ the plain Elvenett snap-distance warning.
 
 A note on schema, and on testing
 ---------------------------------
-FKB-Vann's SOSI product spec defines object types including `ElvBekk`
-(stream/river centreline), `Kanal` (canal), and polygon-edge types like
-`ElvBekkKant` / `Innsjøkant` that are NOT centrelines and should be
-excluded from a "nearest stream line" comparison. Real-world shapefile/
-GML exports commonly carry an object-type attribute (often `objtype` or
-similar, sometimes truncated by older DBF-based tooling) -- but the
-exact column name and casing can vary by export tool and vintage, and
-this project does not have a real FKB-Vann export to test against (the
-sandbox this was written in has no route to Geonorge/Agderkart). So the
-column detection below is deliberately defensive: it looks for a
-plausible object-type column and filters to stream/canal-like values if
-it finds one, but falls back to "use every line geometry in the file"
-with a clear warning if it can't find one, rather than silently
-filtering out everything (or crashing). If it guesses wrong on your
-actual export, the console output tells you exactly what it saw
-(column names, sample object-type values) so the filter can be
-corrected.
+FKB-Vann is delivered as (at least) two different real-world product
+variants, and this script handles both:
+
+- A **line ("linje") delivery**: SOSI object types `ElvBekk`
+  (stream/river centreline) and `Kanal` (canal), plus polygon-edge
+  types like `ElvBekkKant` / `Innsjøkant` that are NOT centrelines and
+  are excluded. Compared against as "distance to nearest stream line".
+- An **area ("område") delivery**: whole water bodies as polygons --
+  `Elv` (river, wide enough to be mapped as a polygon rather than a
+  single centreline), `Innsjø` (lake), and `Havflate` (open sea, which
+  is excluded here since it isn't fish-passage habitat). Compared
+  against as "distance to nearest water polygon" -- 0 if the point
+  already falls inside one.
+
+Real-world shapefile/GML exports commonly carry an object-type
+attribute (often `objtype` or similar, sometimes truncated by older
+DBF-based tooling) -- but the exact column name, casing, and value set
+can vary by export tool, vintage, and which of the two variants above
+you got. So the column/geometry detection below is deliberately
+defensive: it looks for a plausible object-type column and filters to
+water-feature values for whichever geometry type (line or polygon) the
+file actually contains, but falls back to "use every line/polygon
+feature in the file" with a clear warning if it can't find that column,
+rather than silently filtering out everything (or crashing). If it
+guesses wrong on your actual export, the console output tells you
+exactly what it saw (column names, sample object-type values) so the
+filter can be corrected.
+
+*(Validated against a real Kartverket/Geonorge export: the `område`
+polygon variant for Agder, `fkb_vann_omrade` -- 55,727 features,
+objtype values `Elv` (20,945), `Innsjø` (32,176), `Havflate` (1,879),
+delivered in EPSG:25832 covering the whole county. The `linje` variant
+has not been run against a real export.)*
+
+**Important caveat found from that real run, specific to the `område`
+variant:** FKB-Vann only digitizes a river as an area polygon once it's
+wide enough -- narrow streams simply have no `Elv`/`Innsjø` polygon at
+all in this product (they only exist in the `linje` centreline
+delivery). So when comparing against an `område` file, a big
+`fkb_avstand_*_m` number does NOT necessarily mean the two datasets
+disagree about where a stream is -- it can just as easily mean this
+particular stream is too narrow to be represented as a polygon at all,
+and the "nearest" feature found is actually some unrelated, more
+distant river or lake. Confirmed on the real Arendal run: several
+culverts with a near-perfect Elvenett snap (under 10 m) still showed
+FKB "disagreements" of 400-1000+ m, because the nearest `Elv` polygon
+really was that far away -- there was nothing closer to disagree with.
+Treat a flagged disagreement from an `område`-type file as "no
+comparable FKB-Vann polygon nearby" unless the culvert is known to sit
+on a river wide enough to expect one; it is a much more reliable
+disagreement signal for the `linje` (centreline) variant, which
+represents streams of every size.
 
 Usage
 -----
@@ -60,7 +95,11 @@ Usage
 
 The input can be anything geopandas/GDAL can read (shapefile, GML,
 GeoPackage, GeoJSON) -- whatever format your export/download tool gives
-you.
+you. Since a real export can cover a much bigger area than one kommune
+(the Agder-wide `område` file above is one example), this script reads
+only the part of it near the culverts being checked, via a bounding-box
+filter at read time -- much faster and lighter on memory than loading
+the whole file.
 """
 
 import argparse
@@ -68,6 +107,7 @@ from pathlib import Path
 
 import geopandas as gpd
 import pandas as pd
+from shapely.geometry import box
 
 ROOT = Path(__file__).resolve().parent.parent
 IN_CULVERT_CSV = ROOT / "data" / "processed" / "kulvert_punkter_oppstrom.csv"
@@ -87,12 +127,28 @@ ASSUMED_CRS_IF_MISSING = "EPSG:25832"
 # step 4 already snapped to on Elvenett, gets flagged for a closer look.
 DISAGREEMENT_THRESHOLD_M = 15.0
 
+# How far beyond the culverts' own bounding box to read from the FKB-Vann
+# file (metres) -- generous enough that the nearest water feature to an
+# edge culvert isn't missed just because it falls slightly outside the
+# tightest possible box.
+READ_BBOX_BUFFER_M = 500.0
+
 # Object-type values (case-insensitive substring match) that count as a
-# stream/river centreline worth comparing against. Deliberately excludes
-# "...Kant" types (polygon edges, e.g. ElvBekkKant, Innsjøkant) since
-# those trace a bank/shoreline, not the stream itself.
+# stream/river centreline, for a LINE-geometry ("linje") delivery.
+# Deliberately excludes "...Kant" types (polygon edges, e.g. ElvBekkKant,
+# Innsjøkant) since those trace a bank/shoreline, not the stream itself.
 STREAM_LIKE_KEYWORDS = ["elvbekk", "kanal"]
-EXCLUDE_KEYWORDS = ["kant"]
+EXCLUDE_LINE_KEYWORDS = ["kant"]
+
+# Object-type values that count as a real water body, for a POLYGON-
+# geometry ("område") delivery. "elv" also matches "elvbekk" if that
+# ever appears as a polygon. "havflate" (open sea) is excluded -- it's
+# not river/lake fish-passage habitat.
+WATER_AREA_KEYWORDS = ["elv", "innsjø", "innsjo", "kanal", "ferskvann"]
+EXCLUDE_AREA_KEYWORDS = ["havflate"]
+
+LINE_GEOM_TYPES = ["LineString", "MultiLineString"]
+POLYGON_GEOM_TYPES = ["Polygon", "MultiPolygon"]
 
 
 def find_objtype_column(gdf):
@@ -100,36 +156,63 @@ def find_objtype_column(gdf):
     return candidates[0] if candidates else None
 
 
-def filter_to_stream_lines(fkb):
-    """Keep only stream/canal centrelines, as best we can tell from the data."""
+def filter_to_water_features(fkb):
+    """Keep only real water-body geometries, as best we can tell from the data.
+
+    Branches on whichever geometry type the file actually has: a stream
+    line ("linje") delivery is compared as centrelines, a water-body
+    polygon ("område") delivery is compared as areas (a point already
+    inside one has distance 0).
+    """
+    geom_types = set(fkb.geometry.geom_type.unique())
+    is_line_file = bool(geom_types & set(LINE_GEOM_TYPES))
+    is_polygon_file = bool(geom_types & set(POLYGON_GEOM_TYPES))
+
+    if is_line_file:
+        keywords, exclude, shape_kind = STREAM_LIKE_KEYWORDS, EXCLUDE_LINE_KEYWORDS, "stream/canal centreline"
+        geom_filter = LINE_GEOM_TYPES
+    elif is_polygon_file:
+        keywords, exclude, shape_kind = WATER_AREA_KEYWORDS, EXCLUDE_AREA_KEYWORDS, "river/lake/canal polygon"
+        geom_filter = POLYGON_GEOM_TYPES
+        print(
+            "  NOTE: this is a polygon (\"område\") FKB-Vann delivery -- it only "
+            "digitizes rivers wide enough to be an area, so a big disagreement "
+            "below can mean 'no FKB polygon here at all' rather than a real "
+            "positional conflict with Elvenett. See the caveat in this script's "
+            "docstring before treating a flagged culvert as a real problem."
+        )
+    else:
+        print(f"  WARNING: unexpected geometry type(s) {geom_types} -- cannot filter by feature type, using every feature as-is.")
+        return fkb
+
     col = find_objtype_column(fkb)
     if col is not None:
         values = fkb[col].astype(str)
         print(f"  found object-type column '{col}', values seen: {sorted(values.unique())}")
         keep = values.str.lower().apply(
-            lambda v: any(k in v for k in STREAM_LIKE_KEYWORDS) and not any(k in v for k in EXCLUDE_KEYWORDS)
+            lambda v: any(k in v for k in keywords) and not any(k in v for k in exclude)
         )
         filtered = fkb[keep]
         if len(filtered) == 0:
             print(
-                "  WARNING: none of the object-type values matched "
-                f"{STREAM_LIKE_KEYWORDS} -- keeping every line feature instead. "
-                "Check the values printed above and adjust STREAM_LIKE_KEYWORDS "
-                "in this script if that's wrong."
+                f"  WARNING: none of the object-type values matched {keywords} -- "
+                f"keeping every {shape_kind.split('/')[0]}-shaped feature instead. "
+                "Check the values printed above and adjust WATER_AREA_KEYWORDS/"
+                "STREAM_LIKE_KEYWORDS in this script if that's wrong."
             )
         else:
-            print(f"  kept {len(filtered)} of {len(fkb)} features as stream/canal centrelines")
+            print(f"  kept {len(filtered)} of {len(fkb)} features as {shape_kind}s")
             return filtered
     else:
         print(
             f"  WARNING: no object-type column found among {list(fkb.columns)} -- "
-            "cannot filter by feature type, using every line feature in the file."
+            f"cannot filter by feature type, using every {shape_kind.split('/')[0]}-shaped feature in the file."
         )
 
-    lines_only = fkb[fkb.geometry.geom_type.isin(["LineString", "MultiLineString"])]
-    if len(lines_only) < len(fkb):
-        print(f"  dropped {len(fkb) - len(lines_only)} non-line feature(s) (polygons etc.)")
-    return lines_only
+    shape_only = fkb[fkb.geometry.geom_type.isin(geom_filter)]
+    if len(shape_only) < len(fkb):
+        print(f"  dropped {len(fkb) - len(shape_only)} feature(s) of a different geometry type")
+    return shape_only
 
 
 def nearest_distance_m(points, lines_gdf):
@@ -158,19 +241,6 @@ def main():
         print(f"Could not find {IN_CULVERT_CSV} -- run scripts/04_koble_til_elvenett.py first.")
         raise SystemExit(1)
 
-    print(f"Reading FKB-Vann from {fkb_path} ...")
-    fkb = gpd.read_file(fkb_path)
-    print(f"  {len(fkb)} features read, columns: {list(fkb.columns)}")
-    if fkb.crs is None:
-        print(f"  FKB-Vann file has no CRS set -- assuming {ASSUMED_CRS_IF_MISSING}")
-        fkb = fkb.set_crs(ASSUMED_CRS_IF_MISSING)
-    fkb = fkb.to_crs(WORK_CRS)
-
-    streams = filter_to_stream_lines(fkb)
-    if len(streams) == 0:
-        print("No usable line features found in the FKB-Vann file -- nothing to compare against.")
-        raise SystemExit(1)
-
     print(f"Reading {IN_CULVERT_CSV} ...")
     culverts = pd.read_csv(IN_CULVERT_CSV)
     culverts = culverts[culverts["kommune"] == args.kommune].copy()
@@ -183,7 +253,40 @@ def main():
         gpd.points_from_xy(culverts["lon_snappet"], culverts["lat_snappet"]), crs="EPSG:4326"
     ).to_crs(WORK_CRS)
 
-    print("Measuring distances to the nearest FKB-Vann stream line ...")
+    # A real FKB-Vann export can cover a much bigger area than one kommune
+    # (e.g. a whole-county "område" delivery) -- read only a buffered box
+    # around this run's culverts, in the FKB file's own CRS, instead of
+    # loading the whole file.
+    all_points_4326 = gpd.GeoSeries(
+        list(gpd.points_from_xy(culverts["lon_ned"], culverts["lat_ned"]))
+        + list(gpd.points_from_xy(culverts["lon_snappet"], culverts["lat_snappet"])),
+        crs="EPSG:4326",
+    ).to_crs(WORK_CRS)
+    minx, miny, maxx, maxy = all_points_4326.total_bounds
+    bbox_work = box(minx - READ_BBOX_BUFFER_M, miny - READ_BBOX_BUFFER_M, maxx + READ_BBOX_BUFFER_M, maxy + READ_BBOX_BUFFER_M)
+
+    print(f"Reading FKB-Vann from {fkb_path} (bounding box around {args.kommune}'s culverts, +{READ_BBOX_BUFFER_M:.0f} m) ...")
+    fkb_file_crs = gpd.read_file(fkb_path, rows=0).crs
+    if fkb_file_crs is None:
+        print(f"  FKB-Vann file has no CRS set -- assuming {ASSUMED_CRS_IF_MISSING}")
+        fkb_file_crs = ASSUMED_CRS_IF_MISSING
+    bbox_native = gpd.GeoSeries([bbox_work], crs=WORK_CRS).to_crs(fkb_file_crs).total_bounds
+    fkb = gpd.read_file(fkb_path, bbox=tuple(bbox_native))
+    print(f"  {len(fkb)} features read within the bounding box, columns: {list(fkb.columns)}")
+    if fkb.crs is None:
+        fkb = fkb.set_crs(ASSUMED_CRS_IF_MISSING)
+    fkb = fkb.to_crs(WORK_CRS)
+
+    if len(fkb) == 0:
+        print("No FKB-Vann features found near these culverts -- nothing to compare against.")
+        raise SystemExit(1)
+
+    streams = filter_to_water_features(fkb)
+    if len(streams) == 0:
+        print("No usable water-body features found in the FKB-Vann file -- nothing to compare against.")
+        raise SystemExit(1)
+
+    print("Measuring distances to the nearest FKB-Vann water feature ...")
     culverts["fkb_avstand_felt_m"] = nearest_distance_m(field_points, streams)
     culverts["fkb_avstand_snappet_m"] = nearest_distance_m(snapped_points, streams)
     culverts["fkb_uenighet"] = culverts["fkb_avstand_snappet_m"] > DISAGREEMENT_THRESHOLD_M

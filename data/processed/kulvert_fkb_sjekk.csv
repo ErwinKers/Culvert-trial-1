@@ -1,0 +1,45 @@
+id,stedsnavn,kommune,vassdrag,snap_avstand_m,fkb_avstand_felt_m,fkb_avstand_snappet_m,fkb_uenighet
+8,Kystveien ,Arendal,Songebekken,2.14,0.0,1.61,False
+12,Arendal,Arendal,,1177.61,407.72,61.56,True
+17,Arendal ,Arendal,,1348.92,478.72,647.09,True
+28,Arendal ,Arendal,,999.58,392.43,61.56,True
+32,Arendal ,Arendal,"Assævannet, bekkefelt",3.18,0.0,1.87,False
+35,Arendal ,Arendal,,247.75,1.06,2.49,False
+43,"Jernbaneveien (sidebekk Nesevja, som renner ut i Nidelva)",Arendal,Nidelva Furre - Rygene kraftverk bekkefelt,9.67,260.52,257.38,True
+67,Arendal ,Arendal,Nidelva Furre - Rygene kraftverk bekkefelt,5.84,605.08,607.39,True
+88,Løddesølveien (Hildebrandsbekken renner ned i Nordtjenna),Arendal,Nidelva Furre - Rygene kraftverk bekkefelt,8.61,1024.1,1032.67,True
+99,Hoveveien (bekk som renner ut i sandumkilen),Arendal,,743.03,0.0,166.08,True
+103,Løddesølveien (Hildebrandsbekken renner ned i Nordtjenna),Arendal,Nidelva Furre - Rygene kraftverk bekkefelt,53.96,1086.24,1032.51,True
+117,Arendal ,Arendal,Nidelva Furre - Rygene kraftverk bekkefelt,6.25,0.01,4.02,False
+122,Kystveien ,Arendal,,752.91,0.74,10.58,False
+136,Arendal ,Arendal,"Flostadøysund, bekkefelt",9.51,468.63,459.71,True
+142,Arendal ,Arendal,"Longumvatnet, bekkefelt",3.37,0.34,3.58,False
+144,Skoleveien (bekk fra Stemmetjønn til fjord),Arendal,"Flostadøysund, bekkefelt",1.61,0.34,0.0,False
+172,Tvedestrand ,Arendal,Bekk til Strengereidvannet,30.35,3.2,7.24,False
+184,Arendal ,Arendal,"Nidelva, Bekkefelt Helle",3.45,0.52,3.9,False
+187,Arendal,Arendal,Mørløsvatnet - Nidelva,2.17,1.08,0.0,False
+234,Arendal ,Arendal,Molandsvann bekkefelt,7.08,484.89,490.36,True
+241,Riseveien / Jernbaneveien (bekk del av Riseevja som renner ut i Nidelva),Arendal,Messelbekken,0.6,0.0,0.5,False
+257,Arendal ,Arendal,Nidelva Furre - Rygene kraftverk bekkefelt,1.7,0.0,0.64,False
+259,Arendal,Arendal,Molandsvann bekkefelt,4.55,60.47,58.31,True
+281,Arendal ,Arendal,Mørløsvatnet - Nidelva,3.58,0.0,0.0,False
+285,Tromøy,Arendal,,921.64,1100.4,577.41,True
+288,Tromøy,Arendal,,357.8,1073.85,731.42,True
+297,Arendal ,Arendal,"Nidelva, Bekkefelt Helle",0.51,534.54,534.99,True
+299,Arendal ,Arendal,Molandsvann bekkefelt,4.08,2.14,0.8,False
+301,Tromøy ,Arendal,,856.28,0.0,10.8,False
+317,Arendal ,Arendal,Nidelva Furre - Rygene kraftverk bekkefelt,2.13,0.0,1.45,False
+339,Dalenveien (sidebekk Totjern),Arendal,Mørfjærbekken inkl. bekkefelt,0.74,1.61,0.88,False
+342,Tromøy kirkevei (sidebekk Gjerstadvannet),Arendal,,489.31,0.69,274.82,True
+360,Rykeneveien (Rannekleivbekken ned til Nidelva),Arendal,"Nidelva, Bekkefelt Helle",36.85,1.57,0.48,False
+375,Arendal ,Arendal,Mørfjærbekken inkl. bekkefelt,1.62,1.64,0.22,False
+430,Arendal ,Arendal,Nidelva-ytre bekkefelt,5.0,0.0,4.45,False
+497,Tvedestrand ,Arendal,,374.23,0.79,260.91,True
+499,Arendal ,Arendal,Messelbekken,20.75,0.0,10.93,False
+510,Rykeneveien (Kvennebekken renner ned til Nidelva),Arendal,"Nidelva, Bekkefelt Helle",7.84,2.85,1.85,False
+536,Langsæveien (Langsævannet til Barbuelva),Arendal,Barbuelva,6.92,0.0,2.63,False
+545,Arendal ,Arendal,Molandsvann bekkefelt,0.61,0.0,0.09,False
+563,Kystveien (bekk mellom Bjellandsvannet og Jorunnstadkilen),Arendal,"Flostadøysund, bekkefelt",1.75,0.0,0.0,False
+598,Tverrdalsøyveien (bekk mellom Tjønna og Staubøfjorden),Arendal,,1064.62,0.58,692.73,True
+624,"Jernbaneveien (sidebekk Nesevja, som renner ut i Nidelva)",Arendal,Nidelva Furre - Rygene kraftverk bekkefelt,1.01,239.56,239.89,True
+631,Arendal ,Arendal,"Mørløsvatnet - Nidelva, bekkefelt",1.67,395.83,396.53,True
