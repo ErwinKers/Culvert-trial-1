@@ -29,7 +29,17 @@ It shows:
   upstream habitat -- river length AND lake area -- would open up if
   that one were fixed, relative to the other barriers on the map --
   bigger dot = bigger win). Each dot is snapped onto the nearest mapped
-  stream, instead of the raw (slightly imprecise) field coordinate.
+  stream, instead of the raw (slightly imprecise) field coordinate --
+  and if an FKB-Vann export is present, whichever of Elvenett/FKB-Vann
+  is actually closest to the field coordinate is used, since FKB-Vann is
+  positionally more precise (aerial photogrammetry vs. a generalised
+  network product). This only affects where the dot is *drawn*; the
+  priority score and upstream-habitat figures still come from Elvenett's
+  network graph either way, since FKB-Vann has no equivalent
+  connectivity data for the upstream trace (see step 8). On the real
+  Arendal run, FKB-Vann ended up placing 30 of 44 barrier culverts (more
+  precise than Elvenett at that spot), and the number needing a
+  >50&nbsp;m "check this" flag dropped from 13 to 6 as a result.
 - *(If you ran step 4)* the WHOLE river/stream network from NVE's real
   Elvenett data (not just a picture -- actual line-by-line geometry),
   coloured:
@@ -300,7 +310,12 @@ with a small white/black dot marking the original -- so a coordinate
 that lands in the middle of a lake, or nowhere near any mapped stream,
 is immediately visible instead of silently trusted. Only shown beyond
 50 m (`SNAP_WARNING_DISTANCE_M` in `scripts/03_lag_kart.py`) since a
-few metres of GPS noise is normal and not worth flagging.
+few metres of GPS noise is normal and not worth flagging. This 13-of-44
+figure is Elvenett alone, from this step -- step 3's own version of this
+warning uses whichever of Elvenett/FKB-Vann the marker actually ended up
+placed at (see step 3), so on the real Arendal run only 6 of 44 still
+show the warning on the map, the other 7 having been rescued by a closer
+FKB-Vann match.
 
 ### Step 5 -- (optional) add the lake layer to the map
 
@@ -526,12 +541,14 @@ guessed at without a real route to Kartverket's WMS, came back blank on
 a real run) -- and it's been removed outright now that the local-file
 overlay above does the same job reliably. Drawing FKB-Vann's real
 geometry directly also surfaced an important lesson: this data is
-captured at sub-metre precision, so embedding it in the map unsimplified
-made the HTML file balloon from 1.7 MB to 28 MB (slow to load, and
-looked like the map was broken while it caught up) -- step 3 now
-simplifies FKB-Vann's geometry to 2 m before embedding it
-(`FKB_VANN_SIMPLIFY_TOLERANCE_M`), invisible at any
-zoom level you'd actually use, bringing the file back down to ~4 MB.
+captured at sub-metre precision, so embedding it in the map balloons the
+HTML file from 1.7 MB to ~28 MB and makes it noticeably slower to load
+-- tried simplifying the geometry down to ~4 MB first, but the project
+owner asked for full detail instead and confirmed the slower load is
+worth it, so step 3 now embeds FKB-Vann at full precision, no
+simplification. The same full-precision geometry is also what culvert
+snapping (above) measures against, so the extra detail directly
+improves marker accuracy too, not just what you see.
 
 ### Step 9 -- (optional) height profile of a whole vassdrag
 

@@ -33,10 +33,14 @@ What ends up on the map
 * One dot per barrier culvert, coloured red (total) or orange
   (partial) and sized by priority score (see step 4 -- bigger dot =
   fixing it opens up more habitat). If you ran step 4, the dot sits at
-  the point snapped onto the nearest mapped stream, which is more
-  reliable than the raw field coordinate; click a dot to see both the
-  snapped and original position, how far apart they are, and how much
-  river/lake habitat would open up if that culvert were fixed.
+  the point snapped onto the nearest mapped stream (Elvenett), which is
+  more reliable than the raw field coordinate -- and if an FKB-Vann
+  export is present, whichever of Elvenett/FKB-Vann is actually closest
+  to the original field coordinate wins, since FKB-Vann is positionally
+  more precise (see refine_positions_with_fkb). Click a dot to see the
+  original position, which dataset placed it, how far apart they are,
+  and how much river/lake habitat would open up if that culvert were
+  fixed.
 
 * If you ran step 4 with `--dtm`: a small triangle icon wherever the
   river's slope suggests a natural barrier -- solid for a confident
@@ -89,14 +93,13 @@ OUT_HTML = ROOT / "output" / "agder_kulvert_kart.html"
 
 FKB_VANN_COLOR = "#00838f"
 
-# FKB-Vann is captured by aerial photogrammetry at sub-metre precision,
-# which is far more detail than a web map needs (and makes for a huge,
-# slow-to-load HTML file if embedded as-is -- ~370,000 vertices for
-# Arendal's ~1,500 polygons, unsimplified). Simplify to this tolerance
-# (metres, in the file's own projected CRS) before embedding -- visually
-# indistinguishable at any zoom level you'd actually view this map at,
-# roughly a 10x reduction in point count.
-FKB_VANN_SIMPLIFY_TOLERANCE_M = 2.0
+# FKB-Vann is captured by aerial photogrammetry at sub-metre precision.
+# Embedded at full detail (no simplification) at the project owner's
+# request -- makes for a big, slower-to-load HTML file (~28 MB for
+# Arendal's ~1,500 polygons), accepted as worth it for the extra detail,
+# and needed anyway for accurate culvert snapping (see
+# refine_positions_with_fkb below), which works off this same geometry.
+FKB_VANN_CRS = "EPSG:25832"
 
 NATURAL_TIER_LABELS = {
     "sikker": "Sannsynlig naturlig vandringshinder (modellert)",
@@ -154,12 +157,14 @@ def load_geojson(path):
         return json.load(f)
 
 
-def load_fkb_vann_geojson():
-    """Load the local FKB-Vann export (step 8's data) as its own map
-    layer, reprojected to lon/lat -- Kartverket's more detailed
-    hydrography, drawn as real geometry rather than a live WMS picture.
-    Sea ("Havflate") is dropped since it isn't river/lake fish-passage
-    habitat. Returns None if the file isn't there (it's optional)."""
+def load_fkb_vann_gdf():
+    """Load the local FKB-Vann export (step 8's data) at full precision,
+    in its own projected CRS -- used both for the map overlay (see
+    fkb_vann_geojson) and for snapping culverts onto it (see
+    refine_positions_with_fkb), so both use the exact same, real
+    geometry. Sea ("Havflate") is dropped since it isn't river/lake
+    fish-passage habitat. Returns None if the file isn't there (it's
+    optional)."""
     if not IN_FKB_VANN_SHP.exists():
         return None
     import geopandas as gpd
@@ -168,16 +173,77 @@ def load_fkb_vann_geojson():
     if "objtype" in gdf.columns:
         gdf = gdf[gdf["objtype"] != "Havflate"]
     keep_cols = [c for c in ["objtype"] if c in gdf.columns] + ["geometry"]
-    gdf = gdf[keep_cols]
-    gdf["geometry"] = gdf.geometry.simplify(FKB_VANN_SIMPLIFY_TOLERANCE_M, preserve_topology=True)
-    gdf = gdf.to_crs("EPSG:4326")
-    return json.loads(gdf.to_json())
+    return gdf[keep_cols].to_crs(FKB_VANN_CRS)
+
+
+def build_fkb_vann_geojson(gdf):
+    """The FKB-Vann layer for display: same geometry as load_fkb_vann_gdf,
+    reprojected to lon/lat."""
+    return json.loads(gdf.to_crs("EPSG:4326").to_json())
 
 
 def marker_position(row, has_snap):
     if has_snap and pd.notna(row.get("lat_snappet")) and pd.notna(row.get("lon_snappet")):
         return row["lat_snappet"], row["lon_snappet"]
     return row["lat_ned"], row["lon_ned"]
+
+
+def refine_positions_with_fkb(df, fkb_gdf, has_snap):
+    """Decide the final marker position for each culvert: Elvenett's
+    snapped point (see step 4) by default, but FKB-Vann's nearest point
+    instead whenever that's actually closer to the ORIGINAL field
+    coordinate -- FKB-Vann is positionally more precise (aerial
+    photogrammetry vs. a generalised network product, see step 8), so
+    when it disagrees with Elvenett about where the stream is, it's the
+    more trustworthy of the two for where to actually place the dot.
+
+    This only changes where the marker is drawn -- the upstream-trace
+    figures (priority score, oppstrom_lengde_km, ...) still come from
+    Elvenett's network graph regardless, since that's what step 4's walk
+    needs and FKB-Vann has no equivalent connectivity data (see step 8's
+    caveat). Adds `snap_kilde` ("Elvenett"/"FKB-Vann"/"Feltkoordinat")
+    and `beste_avstand_m` columns for the popup."""
+    lat_col, lon_col, kilde_col, dist_col = [], [], [], []
+
+    if fkb_gdf is not None:
+        from shapely.geometry import Point
+        from shapely.ops import nearest_points
+        import geopandas as gpd
+
+    for _, row in df.iterrows():
+        elv_lat, elv_lon = marker_position(row, has_snap)
+        best_lat, best_lon = elv_lat, elv_lon
+        kilde = "Elvenett" if has_snap else "Feltkoordinat"
+        best_dist = row.get("snap_avstand_m") if has_snap else None
+        if best_dist is not None and pd.isna(best_dist):
+            best_dist = None
+
+        if fkb_gdf is not None and pd.notna(row.get("lon_ned")) and pd.notna(row.get("lat_ned")):
+            field_pt = (
+                gpd.GeoSeries([Point(row["lon_ned"], row["lat_ned"])], crs="EPSG:4326")
+                .to_crs(FKB_VANN_CRS)
+                .iloc[0]
+            )
+            dists = fkb_gdf.geometry.distance(field_pt)
+            idx = dists.idxmin()
+            fkb_dist = dists.loc[idx]
+            if best_dist is None or fkb_dist < best_dist:
+                _, nearest_pt = nearest_points(field_pt, fkb_gdf.geometry.loc[idx])
+                nearest_ll = gpd.GeoSeries([nearest_pt], crs=FKB_VANN_CRS).to_crs("EPSG:4326").iloc[0]
+                best_lat, best_lon = nearest_ll.y, nearest_ll.x
+                kilde = "FKB-Vann"
+                best_dist = fkb_dist
+
+        lat_col.append(best_lat)
+        lon_col.append(best_lon)
+        kilde_col.append(kilde)
+        dist_col.append(best_dist)
+
+    df["_map_lat"] = lat_col
+    df["_map_lon"] = lon_col
+    df["snap_kilde"] = kilde_col
+    df["beste_avstand_m"] = pd.to_numeric(pd.Series(dist_col, index=df.index), errors="coerce")
+    return df
 
 
 def build_popup_html(row, has_height, has_snap, has_feltdata):
@@ -209,6 +275,8 @@ def build_popup_html(row, has_height, has_snap, has_feltdata):
         html += field("Oppstrøms elvestrekning som åpnes", row.get("oppstrom_lengde_km"), " km")
         html += field("Oppstrøms innsjøareal som åpnes", row.get("oppstrom_innsjo_km2"), " km2")
         html += field("Avstand kartlagt punkt -> elvenett", row.get("snap_avstand_m"), " m")
+        html += field("Posisjon på kartet hentet fra", row.get("snap_kilde"))
+        html += field("Avstand feltkoordinat -> posisjon på kartet", row.get("beste_avstand_m"), " m")
     if has_feltdata:
         html += "<hr style='margin:4px 0'>"
         html += field("Anadrom strekning (feltvurdering)", row.get("anadrom_strekning"))
@@ -382,7 +450,7 @@ def add_legend(m, has_rivers, has_score, has_natural, has_natural_felt, has_snap
             f"<div style='margin:2px 0'>"
             f"<span style='display:inline-block;width:16px;border-top:2px dashed black;"
             f"margin-right:6px;vertical-align:middle'></span>"
-            f"Feltkoordinat &gt;{SNAP_WARNING_DISTANCE_M:.0f} m fra elvenett -- sjekk denne</div>"
+            f"Feltkoordinat &gt;{SNAP_WARNING_DISTANCE_M:.0f} m fra kartlagt vann (elvenett/FKB-Vann) -- sjekk denne</div>"
         )
 
     legend_html = f"""
@@ -423,25 +491,29 @@ def add_lake_layer(m, geojson):
 
 
 def add_snap_warning_layer(m, df):
-    """For culverts snapped a long way from their original field
+    """For culverts placed a long way from their original field
     coordinate, draw a line from the (likely wrong) original point to
     the point actually used, so the data problem is visible rather than
-    silently trusted."""
-    flagged = df[df["snap_avstand_m"] > SNAP_WARNING_DISTANCE_M]
+    silently trusted. Uses `beste_avstand_m` -- the distance at whichever
+    of Elvenett/FKB-Vann the marker actually ended up placed at (see
+    refine_positions_with_fkb) -- so a culvert FKB-Vann rescued from a
+    bad Elvenett snap no longer gets flagged here."""
+    flagged = df[df["beste_avstand_m"] > SNAP_WARNING_DISTANCE_M]
     if flagged.empty:
         return 0
 
     group = folium.FeatureGroup(
-        name=f"Advarsel: langt fra elvenett (>{SNAP_WARNING_DISTANCE_M:.0f} m)", show=True
+        name=f"Advarsel: langt fra kartlagt vann (>{SNAP_WARNING_DISTANCE_M:.0f} m)", show=True
     )
     for _, row in flagged.iterrows():
         popup_html = (
-            f"<b>Stort avvik mellom feltkoordinat og elvenett</b><br>"
+            f"<b>Stort avvik mellom feltkoordinat og kartlagt vann</b><br>"
             f"Sted: {row.get('stedsnavn') or '(ukjent)'}<br>"
-            f"Avstand: {row['snap_avstand_m']:.0f} m"
+            f"Kilde: {row.get('snap_kilde')}<br>"
+            f"Avstand: {row['beste_avstand_m']:.0f} m"
         )
         folium.PolyLine(
-            locations=[[row["lat_ned"], row["lon_ned"]], [row["lat_snappet"], row["lon_snappet"]]],
+            locations=[[row["lat_ned"], row["lon_ned"]], [row["_map_lat"], row["_map_lon"]]],
             color="#000000",
             weight=2,
             dash_array="5,5",
@@ -549,10 +621,14 @@ def main():
     natural_geojson = load_geojson(IN_GEOJSON_NATURAL)
     natural_felt_geojson = load_geojson(IN_GEOJSON_NATURAL_FELT)
     lake_geojson = load_geojson(IN_GEOJSON_LAKES)
-    fkb_vann_geojson = load_fkb_vann_geojson()
+    fkb_vann_gdf = load_fkb_vann_gdf()
 
-    positions = df.apply(lambda r: marker_position(r, has_snap), axis=1, result_type="expand")
-    df["_map_lat"], df["_map_lon"] = positions[0], positions[1]
+    df = refine_positions_with_fkb(df, fkb_vann_gdf, has_snap)
+    n_fkb_placed = int((df["snap_kilde"] == "FKB-Vann").sum())
+    if n_fkb_placed:
+        print(f"{n_fkb_placed} culvert(s) placed via FKB-Vann instead of Elvenett (closer to the field coordinate)")
+
+    fkb_vann_geojson = build_fkb_vann_geojson(fkb_vann_gdf) if fkb_vann_gdf is not None else None
 
     center_lat = df["_map_lat"].mean()
     center_lon = df["_map_lon"].mean()
@@ -607,12 +683,10 @@ def main():
     for group in groups.values():
         group.add_to(m)
 
-    n_flagged = 0
-    if has_snap:
-        n_flagged = add_snap_warning_layer(m, df)
-        if n_flagged:
-            print(f"{n_flagged} culvert(s) snapped more than {SNAP_WARNING_DISTANCE_M:.0f} m from "
-                  f"their field coordinate -- shown with a dashed line on the map")
+    n_flagged = add_snap_warning_layer(m, df)
+    if n_flagged:
+        print(f"{n_flagged} culvert(s) placed more than {SNAP_WARNING_DISTANCE_M:.0f} m from "
+              f"their field coordinate -- shown with a dashed line on the map")
 
     add_legend(
         m,
