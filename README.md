@@ -744,11 +744,19 @@ detection method.
 Since NVE's Elvenett only names a minority of segments (and, checked
 directly, filtering on that name alone leaves gaps -- some connecting
 stretches carry a different name or none), this script filters on the
-more complete `hierarki` field instead and finds the *longest path*
-through the matched segments (by river length) -- this reliably picks
-out the single main-stem line from mouth to furthest headwater without
-needing to trust segment names or the digitisation direction. For
-Arendalsvassdraget this finds a 17.3 km main stem through 52 segments,
+more complete `hierarki` field instead, then finds the real mouth
+(identified from the segments' own upstream->downstream digitisation
+order, same convention as `REVERSE_FLOW_DIRECTION` in step 4) and the
+*longest path from that mouth* to whichever node ends up farthest away
+-- this reliably picks out the single main-stem line from mouth to
+furthest headwater, correctly bridging naming gaps that a plain
+name-filter misses. (An earlier version of this found the longest path
+between *any* two points instead, trusting only total length and not
+digitisation direction at all -- simpler, but wrong: for a branching
+river that just as easily connects two different headwater tributaries
+as it does the actual mouth, producing a "profile" that isn't one real
+flow line at all. See the real-data finding further down.) For
+Arendalsvassdraget this finds a 12.6 km main stem through 44 segments,
 correctly bridging naming gaps that a plain name-filter misses.
 
 **Most precise elevation source:** `--dtm` with a downloaded GeoTIFF
@@ -769,19 +777,46 @@ the main-stem finding, sampling, and candidate-detection logic all work
 correctly, but said nothing about whether the *method* flags real
 waterfalls, only that the code runs.
 
-The real run found the main stem (52 segments, 17.3 km, out of 487
-segments matching "Arendalsvassdraget" in `hierarki` -- 26 disconnected
-pieces were found and correctly excluded, using only the largest
-connected piece) and produced a genuinely clean-looking result: a flat
-~39 m plateau from km 4-8.5 (almost certainly a lake), then a sharp,
-obvious step from ~48 m to ~123 m between km 12.5 and 14 -- and the
-method correctly flagged that step and nowhere else: **4 confident +
-4 possible candidates, all of them right on that one step, zero false
-positives on the flat stretches either side.** See
-`output/hoydeprofil_arendalsvassdraget.png`. This doesn't confirm any
-specific named waterfall (that needs local knowledge this project
-doesn't have), but it's a strong sign the smoothed-gradient method
-genuinely tracks real terrain, not just the synthetic test case.
+**A second real bug turned up on the first real run, caught by the
+project owner eyeballing the chart: the very first profile went up,
+down, and back up again** -- impossible for a real single flow line,
+since a river's elevation only ever climbs (or holds flat over a lake)
+as you go upstream. The cause: `find_main_stem()` originally found the
+graph's *diameter* -- the longest path between any two points, using
+plain undirected distance -- which, for a branching river tree, has no
+reason to run through the actual mouth at all. It's just as likely to
+connect two *different* headwater tributaries, producing a stitched
+"profile" that walks down one tributary to a shared confluence and back
+*up* an unrelated one -- exactly the up-down-up shape that showed up,
+and exactly right per the project owner's own diagnosis ("you cannot
+add these up or add their height later"). Fixed by anchoring the walk
+at the real mouth instead of an arbitrary pair of endpoints: the mouth
+is identified from Elvenett's own upstream->downstream digitisation
+order (the same convention `REVERSE_FLOW_DIRECTION` already relies on
+in step 4) as the one node nothing flows out of, and the path is then
+the *longest path from that mouth* to whichever node ends up farthest
+away -- always one genuine downstream<->upstream line, never two
+tributaries stitched together. The previous silent "auto-orient by
+comparing the two endpoints' elevation" band-aid is gone too, since it
+could only flip left-right, not fix a path shaped wrong in the middle;
+it's now a loud warning instead, so a real problem stays visible rather
+than being papered over.
+
+The corrected real run finds a shorter main stem (44 segments, 12.6 km,
+out of 487 segments matching "Arendalsvassdraget" in `hierarki` -- 26
+disconnected pieces were found and correctly excluded, using only the
+largest connected piece) and produces a properly monotonic result: flat
+~39 m from km 0-3.7 (a lake right at the mouth), a gentle climb to ~48 m
+by km 8, then the same sharp, obvious real step up to ~123 m between km
+8 and 9.2 that the (buggy) first run also found -- reassuring, since it
+means that part of the earlier result reflected a genuine terrain
+feature even though the axis around it was wrong. The method flags that
+step and nowhere else: **4 confident + 6 possible candidates, all on
+that one step, zero false positives on the flat stretches either
+side.** See `output/hoydeprofil_arendalsvassdraget.png`. This doesn't
+confirm any specific named waterfall (that needs local knowledge this
+project doesn't have), but it's a strong sign the smoothed-gradient
+method genuinely tracks real terrain, not just the synthetic test case.
 
 ## Setup
 

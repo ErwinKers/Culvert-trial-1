@@ -29,13 +29,28 @@ different name or none at all). The `hierarki` field is more complete
 not just the main channel -- a tree, not a single line.
 
 So this script: filters to every segment whose `hierarki` contains the
-given name, builds a graph over just those segments, and finds the
-LONGEST path through it (the "tree diameter", by total river length) --
-this reliably picks out the main stem from mouth to furthest headwater,
-correctly bridging any naming gaps, without needing to trust segment
-names or the digitisation direction. (Checked directly for
-Arendalsvassdraget: 192 segments, mostly one connected piece, longest
-path ~17 km through 52 segments -- a sensible main-stem length.)
+given name, builds a graph over just those segments, finds the real
+MOUTH (the one node nothing flows out of, per Elvenett's own
+upstream->downstream digitisation order -- same convention
+`REVERSE_FLOW_DIRECTION` relies on in step 4), and takes the longest
+path FROM that mouth to whichever node ends up farthest away. This
+reliably picks out the main stem from mouth to furthest headwater,
+correctly bridging any naming gaps.
+
+An earlier version of this found the longest path between ANY two
+points instead (the graph's "diameter"), trusting only total length and
+not digitisation direction at all. That's a real bug, not a simplification:
+for a branching river, the two farthest-apart points are just as likely
+to be two DIFFERENT headwater tributaries as they are to include the
+actual mouth -- producing a "profile" that walks down one tributary to
+a shared confluence and back UP an unrelated one, which no real river
+does (caught by the project owner eyeballing the very first real chart:
+an impossible up-down-up shape). Anchoring at the real mouth and only
+ever walking upstream from there fixes this by construction: the result
+is always one genuine downstream<->upstream line. (Checked directly for
+Arendalsvassdraget: 487 segments matched, 26 disconnected pieces
+correctly excluded, main stem 12.6 km through 44 segments -- a sensible
+main-stem length, and the real elevation run confirms it's monotonic.)
 
 Where to get elevation, and which is most precise
 ---------------------------------------------------
@@ -55,11 +70,13 @@ Two options, same as step 4:
   for this script's point count, just slower and needs a live
   connection; use it if you don't want to download a DTM file.
 
-Either way, this project's build environment has no route to
-Kartverket's services (confirmed repeatedly -- see the elevation
-discussion earlier in this project), so this script has not been run
-against real elevation data. Run it yourself with one of the two flags
-above.
+**Now run for real with `--hoyde-api`** (this project's original build
+environment had no route to Kartverket's services; a real run also
+caught and fixed a wrong API parameter name -- see the elevation
+discussion in the README -- and the mouth-finding bug described above).
+`--dtm` itself hasn't been tried against a real downloaded raster yet,
+only `--hoyde-api`; if you get a DTM file, it's worth running as a
+cross-check.
 
 Usage
 -----
@@ -91,6 +108,12 @@ NATURAL_GRADIENT_CAUTIOUS = 0.07
 
 SAMPLE_INTERVAL_M = 50.0
 
+# Same assumption, and same caveat, as 04_koble_til_elvenett.py: NVE
+# digitizes Elvenett lines upstream -> downstream. Keep these two
+# scripts' setting in sync -- if step 4 needed this flipped for your
+# river data, step 9 needs the same flip.
+REVERSE_FLOW_DIRECTION = False
+
 
 def node_key(coord):
     return (round(coord[0], 1), round(coord[1], 1))
@@ -105,11 +128,34 @@ def find_main_stem(rivers, vassdrag):
         raise SystemExit(1)
     print(f"  {len(sub)} segments matched '{vassdrag}' in hierarki ({sub['elvelengde'].sum()/1000:.1f} km total)")
 
+    # Undirected graph G (just to find the connected component) and a
+    # DIRECTED graph D that respects NVE's upstream->downstream
+    # digitisation order (same convention as step 4's build_graph).
+    #
+    # The previous version of this function found the graph's DIAMETER
+    # (longest path between ANY two nodes) using undirected distances --
+    # which, for a branching river tree, is just as likely to run
+    # between two DIFFERENT headwater tributaries as it is to include
+    # the actual mouth. The resulting "profile" would walk down one
+    # tributary to a shared confluence and then back UP a completely
+    # unrelated tributary -- exactly the impossible up-then-down-then-
+    # up-again shape a real river can never have, since water from two
+    # separate tributaries never flows from one into the other, only
+    # both into what's downstream of their confluence. Anchoring the
+    # walk at the real mouth (identified from flow direction, not
+    # picked arbitrarily) and only ever going upstream from there fixes
+    # this: the result is always one genuine downstream-to-upstream
+    # line, by construction.
     G = nx.Graph()
+    D = nx.DiGraph()
     for idx, geom, length in zip(sub.index, sub.geometry, sub["elvelengde"]):
         coords = list(geom.coords)
-        a, b = node_key(coords[0]), node_key(coords[-1])
-        G.add_edge(a, b, idx=idx, geometry=geom, length=length)
+        if REVERSE_FLOW_DIRECTION:
+            coords = coords[::-1]
+        a, b = node_key(coords[0]), node_key(coords[-1])  # a = upstream end, b = downstream end
+        stored_geom = LineString(coords)
+        G.add_edge(a, b, idx=idx, geometry=stored_geom, length=length)
+        D.add_edge(a, b, idx=idx, geometry=stored_geom, length=length)
 
     components = list(nx.connected_components(G))
     if len(components) > 1:
@@ -121,20 +167,47 @@ def find_main_stem(rivers, vassdrag):
         )
     biggest = max(components, key=len)
     Gc = G.subgraph(biggest)
+    Dc = D.subgraph(biggest)
 
-    # Tree diameter via double-Dijkstra: farthest node from an arbitrary
-    # start, then farthest node from THAT -- the path between those two
-    # is the longest path through the tree, i.e. the main stem.
-    start = next(iter(biggest))
-    dist1 = nx.single_source_dijkstra_path_length(Gc, start, weight="length")
-    end_a = max(dist1, key=dist1.get)
-    dist2 = nx.single_source_dijkstra_path_length(Gc, end_a, weight="length")
-    end_b = max(dist2, key=dist2.get)
-    node_path = nx.dijkstra_path(Gc, end_a, end_b, weight="length")
+    # The mouth is the one node nothing flows OUT of within this
+    # vassdrag (out-degree 0 in the directed graph) -- for a proper
+    # dendritic (non-braided) river tree with consistent digitisation
+    # direction, there should be exactly one. If more than one turns up
+    # (a mapping gap, a backwards-digitised segment, or a hierarki-
+    # matching quirk pulling in an unrelated fragment), pick whichever
+    # drains the most total upstream river length -- the real main
+    # outlet, not a stray dead end.
+    sinks = [n for n in Dc.nodes if Dc.out_degree(n) == 0]
+    if not sinks:
+        raise SystemExit(
+            "Could not find an outlet node -- every node has an outgoing edge, which usually "
+            "means the network is digitised backwards here. Try REVERSE_FLOW_DIRECTION = True."
+        )
+    if len(sinks) == 1:
+        mouth = sinks[0]
+    else:
+        Dc_rev = Dc.reverse(copy=False)
+        upstream_length = {
+            s: sum(Dc_rev.edges[e]["length"] for e in nx.dfs_edges(Dc_rev, s)) for s in sinks
+        }
+        mouth = max(upstream_length, key=upstream_length.get)
+        print(
+            f"  WARNING: {len(sinks)} outlet candidate(s) found within this vassdrag (a mapping "
+            f"gap, backwards-digitised segment, or hierarki-matching quirk, most likely) -- using "
+            f"the one draining the most river length ({upstream_length[mouth]/1000:.1f} km)."
+        )
 
-    print(f"  main stem: {len(node_path) - 1} segments, {dist2[end_b]/1000:.1f} km")
+    # Longest path FROM the real mouth to whichever node ends up
+    # farthest from it (by total river length) -- "mouth to furthest
+    # headwater", always one real downstream<->upstream line.
+    dist = nx.single_source_dijkstra_path_length(Gc, mouth, weight="length")
+    source = max(dist, key=dist.get)
+    node_path = nx.dijkstra_path(Gc, mouth, source, weight="length")
 
-    # Stitch the segment geometries together in path order.
+    print(f"  main stem: {len(node_path) - 1} segments, {dist[source]/1000:.1f} km (mouth -> furthest headwater)")
+
+    # Stitch the segment geometries together in path order, starting at
+    # the mouth.
     pieces = []
     for a, b in zip(node_path[:-1], node_path[1:]):
         edge = Gc[a][b]
@@ -268,12 +341,22 @@ def main():
     distances, elevations = zip(*kept)
     distances, elevations = list(distances), list(elevations)
 
-    # Auto-orient so the profile always reads outlet (low) -> source
-    # (high), left to right, regardless of how the source data was
-    # digitised -- more robust than trusting a flow-direction flag.
+    # find_main_stem() already guarantees distances run mouth -> furthest
+    # headwater (see its docstring comment on why that has to be done by
+    # anchoring at the real, flow-direction-identified outlet, not by
+    # picking whichever orientation happens to look right afterwards).
+    # A real river can have local elevation dips (a lake, a meander) but
+    # its overall endpoints should still climb outlet -> source; if they
+    # don't, silently flipping the x-axis would only hide a genuine
+    # problem (REVERSE_FLOW_DIRECTION likely needs toggling here) behind
+    # a profile that merely *looks* plausible.
     if elevations[0] > elevations[-1]:
-        distances = [total_length - d for d in reversed(distances)]
-        elevations = list(reversed(elevations))
+        print(
+            f"  WARNING: the outlet end ({elevations[0]:.0f} moh) is HIGHER than the far end "
+            f"({elevations[-1]:.0f} moh) -- that shouldn't happen for a real mouth-to-headwater "
+            f"line. Check REVERSE_FLOW_DIRECTION at the top of this script; the profile below is "
+            f"plotted as-found, not flipped, so this is visible rather than hidden."
+        )
 
     # Same smoothed-gradient method as step 4, applied along the
     # continuous point series instead of per-segment.
