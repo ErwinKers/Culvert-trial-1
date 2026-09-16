@@ -19,12 +19,18 @@ to the side of the actual stream. So instead we:
      if an FKB-Vann export is given (--fkb, on by default), and a
      culvert's field coordinate sits closer to an FKB-Vann water feature
      than to any Elvenett line, FKB-Vann's nearer, more precise point is
-     used to decide WHICH Elvenett edge (and where along it) to snap to,
-     instead of the raw field coordinate. The culvert still ends up
-     snapped onto Elvenett either way -- only the CHOICE of where on it
-     improves -- so the marker position, the upstream trace, the
-     coloured river, and the priority score all stay consistent with
-     each other; nothing downstream needs to know FKB-Vann was involved.
+     used TWICE: as the actual marker position shown on the map (since
+     it's the more accurate of the two), and to decide which Elvenett
+     edge (and where along it) the upstream walk below starts from --
+     the walk itself always needs an actual Elvenett edge, FKB-Vann has
+     no equivalent network/flow-direction data. The marker can end up a
+     little off the coloured line it's tracing from as a result (the
+     same way a raw field coordinate always could be a little off the
+     line too -- see SNAP_WARNING_DISTANCE_M) -- but the walk, the
+     colouring, and the score are always computed from the SAME
+     FKB-Vann-informed point the marker is drawn at, so they can't
+     silently drift out of sync with each other the way a purely
+     cosmetic override (e.g. done later in step 3) would risk.
   3. Walk UPSTREAM through the river network graph from that snapped
      point, collecting every stream segment that eventually flows
      into it -- but STOP walking further up any branch as soon as we
@@ -475,13 +481,13 @@ def main():
         help=(
             "Path to an FKB-Vann export (see step 8). When a culvert's field coordinate sits "
             "closer to an FKB-Vann water feature than to any Elvenett line, that FKB-Vann point "
-            "is used as the snap INPUT instead of the raw field coordinate -- FKB-Vann is "
-            "positionally more precise (aerial photogrammetry vs. a generalised network product), "
-            "so this gives a better-informed choice of which Elvenett edge to snap to and where "
-            "along it. The culvert still ends up snapped ONTO Elvenett either way (needed for the "
-            "upstream graph walk) -- this only improves which point on that network gets picked, "
-            "so the marker position, the coloured trace, and the priority score all stay "
-            "consistent with each other. Pass an empty string to disable."
+            "is used as BOTH the displayed marker position (FKB-Vann is positionally more "
+            "precise -- aerial photogrammetry vs. a generalised network product) AND the input "
+            "for choosing which Elvenett edge the upstream graph walk starts from (Elvenett is "
+            "still what the walk itself needs; FKB-Vann has no flow-direction/connectivity data "
+            "of its own). Both uses come from the same corrected point, so the walk/colouring/"
+            "score can't drift out of sync with where the marker is drawn. Pass an empty string "
+            "to disable."
         ),
     )
     args = parser.parse_args()
@@ -685,6 +691,7 @@ def main():
 
     print("Tracing upstream from each culvert (stopping at other barriers) ...")
     upstream_km, upstream_lake_km2, snap_dist_out, snap_lon, snap_lat = [], [], [], [], []
+    elvenett_dist_out = []
     edge_intervals = {}  # edge_idx -> list of (start, end, priority)
 
     for i, row in culvert_points.iterrows():
@@ -704,26 +711,50 @@ def main():
                 lake_km2 = float(touching["areal_km2"].sum())
         upstream_lake_km2.append(lake_km2)
 
+        # The point used for the GRAPH WALK above is always on Elvenett
+        # (the network needs an actual edge to trace from) -- keep track
+        # of how far THAT is from the field point (elvenett_avstand_m),
+        # regardless of what gets displayed, since that's what actually
+        # determines whether the trace/score below means anything.
         geom = rivers.geometry.iloc[snap_edge[i]]
-        snapped_point = geom.interpolate(snap_proj[i])
-        snapped_wgs84 = gpd.GeoSeries([snapped_point], crs=WORK_CRS).to_crs("EPSG:4326").iloc[0]
-        snap_lon.append(snapped_wgs84.x)
-        snap_lat.append(snapped_wgs84.y)
+        elvenett_point = geom.interpolate(snap_proj[i])
+        elvenett_dist_out.append(float(row.geometry.distance(elvenett_point)))
+
+        # The point we DISPLAY is different: when FKB-Vann informed this
+        # culvert's snap, show it at FKB-Vann's own point -- the more
+        # precise, more accurate location -- rather than pulling it back
+        # onto the (less precise) Elvenett line just to sit exactly on
+        # the drawn network. A few metres/tens of metres between the dot
+        # and the coloured line it's tracing from is expected and
+        # honest, the same way the original raw-field-coordinate snap
+        # always could be a little off the line too (see
+        # SNAP_WARNING_DISTANCE_M).
+        display_point = snap_source.loc[i] if snap_kilde.loc[i] == "FKB-Vann" else elvenett_point
+        display_wgs84 = gpd.GeoSeries([display_point], crs=WORK_CRS).to_crs("EPSG:4326").iloc[0]
+        snap_lon.append(display_wgs84.x)
+        snap_lat.append(display_wgs84.y)
         upstream_km.append(total_length_m / 1000)
         # The distance that actually matters for "how far is the marker
         # from where the surveyor stood": from the ORIGINAL field point
-        # to the final snapped point -- not the (possibly smaller, FKB-
-        # Vann-corrected-point-to-edge) distance used to pick the edge.
-        snap_dist_out.append(float(row.geometry.distance(snapped_point)))
+        # to the final displayed point.
+        snap_dist_out.append(float(row.geometry.distance(display_point)))
 
     culverts["lon_snappet"] = snap_lon
     culverts["lat_snappet"] = snap_lat
     culverts["snap_avstand_m"] = snap_dist_out
+    culverts["elvenett_avstand_m"] = elvenett_dist_out
     culverts["snap_kilde"] = snap_kilde.values
     culverts["fkb_avstand_felt_m"] = fkb_avstand_felt.values
+    # NOTE: deliberately checks elvenett_avstand_m here, not
+    # snap_avstand_m -- snap_avstand_m is "how far is the MARKER from
+    # the field point" (small for an FKB-Vann-placed marker, by
+    # construction), but what determines whether the trace/score can be
+    # trusted is "how far is the ELVENETT EDGE we're tracing from" --
+    # those are different questions once the marker can sit at FKB-Vann's
+    # point instead of on the Elvenett line itself.
     culverts["score_upalitelig"] = (
         (culverts["fkb_avstand_felt_m"] < FKB_CONFIRMS_WATER_DISTANCE_M)
-        & (culverts["snap_avstand_m"] > SUSPICIOUS_SNAP_DISTANCE_M)
+        & (culverts["elvenett_avstand_m"] > SUSPICIOUS_SNAP_DISTANCE_M)
     )
     culverts["oppstrom_lengde_km"] = upstream_km
     culverts["oppstrom_innsjo_km2"] = upstream_lake_km2
@@ -742,8 +773,12 @@ def main():
     culverts["prioriteringsscore"] = (blended * 100).round().astype(int)
 
     n_suspicious = (culverts["snap_avstand_m"] > SUSPICIOUS_SNAP_DISTANCE_M).sum()
-    print(f"\n{n_suspicious} culverts snapped more than {SUSPICIOUS_SNAP_DISTANCE_M} m "
-          f"away from their nearest river line -- worth a manual look.")
+    print(f"\n{n_suspicious} culverts placed (marker position) more than "
+          f"{SUSPICIOUS_SNAP_DISTANCE_M:.0f} m from their field coordinate -- worth a manual look.")
+    n_elvenett_far = (culverts["elvenett_avstand_m"] > SUSPICIOUS_SNAP_DISTANCE_M).sum()
+    print(f"{n_elvenett_far} culverts trace from an Elvenett edge more than "
+          f"{SUSPICIOUS_SNAP_DISTANCE_M:.0f} m from their field coordinate (this is what the "
+          f"upstream walk/score actually use, regardless of where the marker itself is drawn).")
     n_unreliable = int(culverts["score_upalitelig"].sum())
     if n_unreliable:
         print(

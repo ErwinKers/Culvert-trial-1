@@ -28,17 +28,20 @@ It shows:
   (Partiell/partial), **sized by its priority score** (0-100: how much
   upstream habitat -- river length AND lake area -- would open up if
   that one were fixed, relative to the other barriers on the map --
-  bigger dot = bigger win). Each dot is snapped onto the nearest mapped
-  Elvenett stream (step 4), instead of the raw (slightly imprecise)
-  field coordinate -- and if an FKB-Vann export is given to step 4
-  (on by default), that snap is itself informed by FKB-Vann whenever
-  it's positionally closer to the field coordinate than Elvenett's own
-  line is, since FKB-Vann is more precise (aerial photogrammetry vs. a
-  generalised network product). This is done once, in step 4, and
-  everything downstream -- the dot's position, the coloured trace, and
-  the priority score -- is computed from that one, single corrected
-  point, so they always agree with each other. On the real Arendal run,
-  FKB-Vann informed the snap for 30 of 44 barrier culverts.
+  bigger dot = bigger win). The dot is drawn at whichever of
+  Elvenett/FKB-Vann is actually closest to the field coordinate (step
+  4) -- FKB-Vann when it has a water feature closer than Elvenett's own
+  line (more precise: aerial photogrammetry vs. a generalised network
+  product), Elvenett's snapped point otherwise. The upstream trace and
+  priority score are separately computed from wherever on *Elvenett*
+  the walk actually starts (FKB-Vann has no network/flow-direction data
+  of its own, so it can only inform *which* Elvenett edge that is, not
+  replace it) -- both derived from the same FKB-Vann-informed decision,
+  in one place in step 4, so they can't silently drift out of sync with
+  each other. On the real Arendal run, FKB-Vann placed 30 of 44 barrier
+  culverts' dots; the two distances involved (marker-to-field-point,
+  and Elvenett-edge-to-field-point) are both shown in the popup, along
+  with which one applies.
 - *(If you ran step 4)* the WHOLE river/stream network from NVE's real
   Elvenett data (not just a picture -- actual line-by-line geometry),
   coloured:
@@ -216,31 +219,46 @@ where the priority score is worked out. It:
    closest mapped stream is. **If an FKB-Vann export is given (`--fkb`,
    on by default, pointing at the file step 8 uses)** and it has a
    water feature closer to the field coordinate than Elvenett's own
-   line is, that FKB-Vann point -- not the raw field coordinate -- is
-   used to decide *which* Elvenett edge to snap to and *where* along
-   it, since FKB-Vann is positionally more precise (aerial
-   photogrammetry vs. a generalised network product). The culvert still
-   ends up snapped ONTO Elvenett either way (the walk below needs an
-   actual graph edge to start from) -- this only improves the choice of
-   where on it. Crucially, this correction happens *before* the walk,
-   so the snapped point used for the marker, the coloured trace, and
-   the score are always the same point -- unlike layering a
-   separate "prettier position" on top afterwards, which would leave
-   the trace/score computed from a different point than the dot is
-   drawn at. On the real Arendal run, FKB-Vann informed the snap for 30
-   of 44 barrier culverts.
+   line is, FKB-Vann's own point is used for two things at once, since
+   FKB-Vann is positionally more precise (aerial photogrammetry vs. a
+   generalised network product):
+   - **as the actual marker position** shown on the map and in the
+     popup (`lon_snappet`/`lat_snappet`) -- the more accurate of the
+     two, so that's what gets drawn;
+   - **as the input for deciding which Elvenett edge** (and where along
+     it) the upstream walk below starts from, instead of the raw field
+     coordinate -- the walk still needs an actual Elvenett graph edge,
+     FKB-Vann has no equivalent network/flow-direction data of its own.
+
+   Both uses come from the same FKB-Vann-informed decision, computed
+   once, so the walk/coloured trace/score can't silently drift out of
+   sync with wherever the marker ends up drawn -- even though the
+   marker and the Elvenett edge it traces from can now legitimately be
+   a little apart (the same way a raw field coordinate always could be
+   a little off the Elvenett line it snapped to -- see
+   `SNAP_WARNING_DISTANCE_M`). Two separate distances are kept in the
+   output so this stays transparent: `snap_avstand_m` (field coordinate
+   to the drawn marker) and `elvenett_avstand_m` (field coordinate to
+   the Elvenett edge the trace actually uses) -- on the real Arendal
+   run, FKB-Vann placed 30 of 44 markers, 6 culverts still have a marker
+   >50 m from their field coordinate, and 13 have an Elvenett edge >50 m
+   away (a separate, usually larger set, since FKB-Vann can make the
+   *marker* accurate without Elvenett having anything nearby to trace
+   from at all).
 
    **Not every case is fixable this way, though.** For 7 of the 44,
-   FKB-Vann confirms real water within 30 m of the field coordinate,
-   but Elvenett has no edge *anywhere* nearby -- correcting the input
-   point can only pick a better *existing* Elvenett edge, it can't
-   invent one where the network simply has a gap. For these, the walk
-   is still forced onto the nearest (possibly 500+ m away, likely
-   unrelated) Elvenett edge, so the resulting `oppstrom_lengde_km` and
-   priority score are probably wrong -- flagged as `score_upalitelig`
-   in the output and excluded from step 7's ranked report, and shown on
-   the map as a culvert with a thick black dashed ring around it,
-   rather than silently presenting a fabricated-looking number.
+   FKB-Vann confirms real water within 30 m of the field coordinate
+   (so the marker itself ends up accurately placed), but Elvenett has
+   no edge *anywhere* nearby -- correcting the input point can only
+   pick a better *existing* Elvenett edge, it can't invent one where
+   the network simply has a gap. For these, the walk is still forced
+   onto the nearest (possibly 500+ m away, likely unrelated) Elvenett
+   edge, so the resulting `oppstrom_lengde_km` and priority score are
+   probably wrong even though the dot itself is in the right place --
+   flagged as `score_upalitelig` in the output and excluded from step
+   7's ranked report, and shown on the map as a culvert with a thick
+   black dashed ring around it, rather than silently presenting a
+   fabricated-looking number.
 3. **Walks upstream** through the network graph from that snapped
    point, collecting every segment that genuinely becomes reachable --
    handling branches/tributaries correctly, without double-counting --
@@ -351,22 +369,32 @@ result looks topologically correct (proper branching streams, sensible
 lengths), but if a river you know well looks reversed on the map
 (orange/red appearing *downstream* of a barrier instead of upstream),
 set `REVERSE_FLOW_DIRECTION = True` near the top of the script and
-re-run. Also check the console output for how many culverts snapped
-more than `SUSPICIOUS_SNAP_DISTANCE_M` (50 m) from any mapped stream
-even after the FKB-Vann-informed correction above (13 of 44 in the
-current Arendal run) -- those are worth a manual look (either a
-coordinate error, or the culvert is on a stream too small for either
-Elvenett or FKB-Vann to include). 7 of those 13 have FKB-Vann
-confirming real water right at the field point with no nearby Elvenett
-edge at all -- those are the `score_upalitelig` ones (see above), a
-genuine Elvenett network gap, not something snapping logic alone can
-fix. **Step 3 draws all 13 on the map too:** a dashed line from the
-original field coordinate to the point actually used, with a small
-white/black dot marking the original -- so a coordinate that lands in
-the middle of a lake, or nowhere near any mapped stream, is immediately
-visible instead of silently trusted. Only shown beyond 50 m
-(`SNAP_WARNING_DISTANCE_M` in `scripts/03_lag_kart.py`) since a few
-metres of GPS noise is normal and not worth flagging.
+re-run. Also check the console output for two separate distances,
+both against `SUSPICIOUS_SNAP_DISTANCE_M` (50 m):
+
+- **`snap_avstand_m`** (field coordinate to the drawn marker) -- 6 of
+  44 in the current Arendal run. These are worth a manual look: either
+  a genuine coordinate error, or the culvert is on a stream too small
+  for either Elvenett or FKB-Vann to include at all.
+- **`elvenett_avstand_m`** (field coordinate to the Elvenett edge the
+  upstream trace actually starts from) -- 13 of 44, a larger set, since
+  FKB-Vann can place the *marker* accurately without Elvenett having
+  anything nearby to trace from. 7 of those 13 are the
+  `score_upalitelig` culverts (see above) -- their marker is fine
+  (FKB-Vann confirms real water right at the field point) but their
+  score isn't, a genuine Elvenett network gap that snapping logic alone
+  can't fix.
+
+**Step 3 draws the `snap_avstand_m` warning on the map:** a dashed line
+from the original field coordinate to the point actually used, with a
+small white/black dot marking the original -- so a coordinate that
+lands in the middle of a lake, or nowhere near any mapped stream, is
+immediately visible instead of silently trusted. Only shown beyond
+50 m (`SNAP_WARNING_DISTANCE_M` in `scripts/03_lag_kart.py`) since a
+few metres of GPS noise is normal and not worth flagging; the
+`score_upalitelig` culverts get their own, separate black-ringed marker
+style instead (see step 3), since their marker position itself isn't
+the problem.
 
 ### Step 5 -- (optional) add the lake layer to the map
 
@@ -809,10 +837,14 @@ project actually ran into (in rough order of impact):
   today (only 9 of 44 barrier culverts have a definite answer; see step
   6). It would let the priority score account for fish presence, not
   just reachable habitat area.
-- **Corrected coordinates for the 13 culverts that snapped >50 m from
-  any mapped stream** (Step 4's console output lists them, and they're
-  shown as dashed lines on the map) -- either the field GPS point is
-  off, or the stream they're on is smaller than what Elvenett maps.
+- **Corrected coordinates for the 6 culverts whose marker still sits
+  >50 m from their field coordinate** even after the FKB-Vann-informed
+  snap (step 4's console output lists them, and they're shown as dashed
+  lines on the map) -- either the field GPS point is off, or the
+  culvert is on a stream too small for either Elvenett or FKB-Vann to
+  map. Separately, the 7 `score_upalitelig` culverts (marker fine, but
+  no nearby Elvenett edge to trace a score from) would benefit most
+  from an Elvenett update or a manually-traced upstream length.
 - **Lake depth/bathymetry data**, if any exists for the 201 lakes in
   the Arendal export -- NVE's own lake layer has no bathymetry on file
   for any of them (see step 5), so the score currently uses surface

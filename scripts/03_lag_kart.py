@@ -251,6 +251,7 @@ def build_popup_html(row, has_height, has_snap, has_feltdata):
         html += field("Avstand feltkoordinat -> posisjon på kartet", row.get("snap_avstand_m"), " m")
         html += field("Posisjon valgt via", row.get("snap_kilde"))
         html += field("Avstand feltkoordinat -> nærmeste FKB-Vann", row.get("fkb_avstand_felt_m"), " m")
+        html += field("Avstand feltkoordinat -> elvenett-gren (brukt i score)", row.get("elvenett_avstand_m"), " m")
     if has_feltdata:
         html += "<hr style='margin:4px 0'>"
         html += field("Anadrom strekning (feltvurdering)", row.get("anadrom_strekning"))
