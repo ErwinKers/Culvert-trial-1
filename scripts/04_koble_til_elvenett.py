@@ -173,6 +173,7 @@ IN_CSV_CANDIDATES = [
 OUT_CSV = ROOT / "data" / "processed" / "kulvert_punkter_oppstrom.csv"
 OUT_GEOJSON = ROOT / "data" / "processed" / "elvenett_farget.geojson"
 OUT_NATURAL_GEOJSON = ROOT / "data" / "processed" / "naturlige_hindre.geojson"
+OUT_FKB_GEOJSON = ROOT / "data" / "processed" / "fkb_vann_farget.geojson"
 HOYDE_CACHE_FILE = ROOT / "data" / "processed" / "hoyde_cache_elvenett.json"
 
 # A projected, metre-based coordinate system to do the distance/length
@@ -345,7 +346,7 @@ def make_api_elevation_lookup(work_crs, cache_path):
             return cache[key]
         try:
             r = session.get(
-                API_URL, params={"nord": lat, "ost": lon, "koordsystemkode": 4326, "geojson": "false"}, timeout=10
+                API_URL, params={"nord": lat, "ost": lon, "koordsys": 4326, "geojson": "false"}, timeout=10
             )
             r.raise_for_status()
             punkter = r.json().get("punkter") or []
@@ -456,6 +457,78 @@ def resolve_edge_coloring(length, intervals):
         else:
             merged.append((a, b, color))
     return merged
+
+
+def build_fkb_adjacency(fkb):
+    """{polygon position: set(touching polygon positions)} -- which
+    FKB-Vann polygons share a border, i.e. are part of the same
+    connected stream/lake. `fkb` must have a plain 0..n-1 RangeIndex
+    (see main()). A small buffer absorbs floating-point gaps between
+    adjacent polygons that should touch but don't *quite*, geometrically."""
+    sindex = fkb.sindex
+    adjacency = {i: set() for i in range(len(fkb))}
+    for i, geom in enumerate(fkb.geometry):
+        for j in sindex.query(geom.buffer(0.5), predicate="intersects"):
+            j = int(j)
+            if j != i:
+                adjacency[i].add(j)
+                adjacency[j].add(i)
+    return adjacency
+
+
+def sample_fkb_elevations(fkb, elevation_at):
+    """Elevation (metres) at each FKB-Vann polygon's centroid -- one
+    lookup per polygon. `elevation_at` already caches internally (see
+    make_api_elevation_lookup/make_raster_elevation_lookup), so this is
+    just as cheap to re-run as the Elvenett natural-barrier screening
+    that also uses it. Returns {polygon position: elevation or None}."""
+    return {i: elevation_at(geom.centroid) for i, geom in enumerate(fkb.geometry)}
+
+
+def build_fkb_flow_graph(adjacency, elevations):
+    """Directed graph, one edge (higher-elevation polygon -> lower) per
+    touching pair -- FKB-Vann carries no flow-direction data of its own
+    (unlike Elvenett, digitized upstream-to-downstream), so this
+    approximates it from elevation instead: water flows downhill. Pairs
+    where either polygon's elevation is unknown, or the two are equal,
+    get no edge -- direction genuinely can't be determined there, so we
+    don't guess."""
+    G = nx.DiGraph()
+    G.add_nodes_from(adjacency.keys())
+    for i, neighbors in adjacency.items():
+        zi = elevations.get(i)
+        if zi is None:
+            continue
+        for j in neighbors:
+            if j <= i:
+                continue  # each undirected pair only needs handling once
+            zj = elevations.get(j)
+            if zj is None or zi == zj:
+                continue
+            hi, lo = (i, j) if zi > zj else (j, i)
+            G.add_edge(hi, lo)
+    return G
+
+
+def trace_fkb_upstream(G, source, other_barrier_polys):
+    """Walk upstream from FKB-Vann polygon `source` -- following
+    PREDECESSOR edges in the elevation-derived flow graph (toward higher
+    ground) -- collecting every polygon reached, but not crossing INTO
+    any polygon another barrier culvert sits on (mirrors Elvenett's
+    Absolutt-barrier stop, at whole-polygon granularity: FKB-Vann has no
+    within-polygon position to cut at more precisely, unlike Elvenett's
+    exact metre-level split). Returns the set of polygon positions
+    reached, source included."""
+    visited = {source}
+    stack = [source]
+    while stack:
+        node = stack.pop()
+        for pred in G.predecessors(node):
+            if pred in visited or pred in other_barrier_polys:
+                continue
+            visited.add(pred)
+            stack.append(pred)
+    return visited
 
 
 def main():
@@ -586,9 +659,17 @@ def main():
             fkb = gpd.read_file(fkb_path).to_crs(WORK_CRS)
             if "objtype" in fkb.columns:
                 fkb = fkb[fkb["objtype"] != "Havflate"]
+            fkb = fkb.reset_index(drop=True)
             print(f"  {len(fkb)} water feature(s) (sea excluded)")
         else:
             print(f"No FKB-Vann file found at {fkb_path} -- skipping FKB-Vann-informed snapping")
+
+    # Nearest FKB-Vann polygon index for every culvert (not just the ones
+    # that end up using it as the snap source) -- reused below by
+    # trace_fkb_upstream() to know which polygon each culvert (including
+    # OTHER barriers) sits on, the same way snap_edge/absolutt_cuts_by_edge
+    # does for Elvenett.
+    fkb_nearest_idx = pd.Series(pd.NA, index=culvert_points.index, dtype="Int64")
 
     if fkb is not None and len(fkb) > 0:
         from shapely.ops import nearest_points
@@ -599,6 +680,7 @@ def main():
             elvenett_dist = float(nearest.loc[i, "snap_avstand_m"])
             dists = fkb.geometry.distance(felt_pt)
             idx = dists.idxmin()
+            fkb_nearest_idx.loc[i] = int(idx)
             fkb_dist = float(dists.loc[idx])
             fkb_avstand_felt.loc[i] = fkb_dist
             if fkb_dist < elvenett_dist:
@@ -627,8 +709,11 @@ def main():
         elevation_at, cleanup_elevation = make_api_elevation_lookup(WORK_CRS, HOYDE_CACHE_FILE)
 
     if elevation_at is not None:
+        # NOTE: cleanup_elevation() is deliberately NOT called here --
+        # trace_fkb_upstream() below reuses this same elevation_at (and,
+        # for --dtm, the still-open raster) to infer FKB-Vann flow
+        # direction. Called once, after both uses, near the end of main().
         gradients = find_natural_barrier_candidates(G, edge_geom, elevation_at)
-        cleanup_elevation()
         natural_cut_by_edge, natural_features = classify_natural_barriers(gradients, edge_geom, rivers, name_col)
         n_certain = sum(1 for f in natural_features if f["properties"]["tier"] == "sikker")
         n_cautious = len(natural_features) - n_certain
@@ -843,6 +928,94 @@ def main():
         n_with_lake = (culverts["oppstrom_innsjo_km2"] > 0).sum()
         print(f"{n_with_lake} of {len(culverts)} culverts have a lake somewhere upstream "
               f"(total {culverts['oppstrom_innsjo_km2'].sum():.2f} km2 across all of them)")
+
+    # FKB-Vann upstream trace, for the score_upalitelig culverts FKB-Vann
+    # actually confirms water for (n_fkb_confirmed, above): a real,
+    # computed reachable-AREA figure and matching red/orange map
+    # colouring on FKB-Vann itself, since Elvenett can't provide either
+    # for these. FKB-Vann carries no flow-direction data of its own, so
+    # direction is inferred from elevation (water flows downhill) --
+    # needs --dtm or --hoyde-api, the same elevation source already used
+    # for natural-barrier detection above; skipped otherwise.
+    fkb_colored_features = []
+    # In square metres, not km2 -- these reaches are small (single-digit
+    # to low-thousands of m2, since they're specifically the streams too
+    # small/disconnected for Elvenett to map at all), and rounding a
+    # figure like 42 m2 to 2 decimals of km2 would display as a
+    # misleading "0.00".
+    culverts["oppstrom_fkb_areal_m2"] = float("nan")
+    culverts["prioriteringsscore_fkb"] = pd.array([pd.NA] * len(culverts), dtype="Int64")
+    if elevation_at is not None and fkb is not None and len(fkb) > 0 and n_fkb_confirmed:
+        print(
+            f"Tracing upstream on FKB-Vann for the {n_fkb_confirmed} FKB-confirmed culvert(s) "
+            "(elevation-inferred flow direction, one lookup per FKB-Vann polygon) ..."
+        )
+        adjacency = build_fkb_adjacency(fkb)
+        fkb_elevations = sample_fkb_elevations(fkb, elevation_at)
+        n_known = sum(1 for z in fkb_elevations.values() if z is not None)
+        print(f"  elevation known for {n_known} of {len(fkb)} FKB-Vann polygons")
+        fkb_flow_graph = build_fkb_flow_graph(adjacency, fkb_elevations)
+
+        # Every OTHER Absolutt-barrier culvert's nearest FKB-Vann polygon
+        # acts as a stop, the same way absolutt_cuts_by_edge does for
+        # Elvenett -- just at whole-polygon granularity (FKB-Vann has no
+        # within-polygon position to cut at more precisely).
+        absolutt_fkb_polys = {
+            int(fkb_nearest_idx.loc[j])
+            for j in culverts.index
+            if culverts.loc[j, "barrier_category"] == "Absolutt" and pd.notna(fkb_nearest_idx.loc[j])
+        }
+
+        target_idx = culverts.index[
+            culverts["score_upalitelig"] & (culverts["fkb_avstand_felt_m"] < FKB_CONFIRMS_WATER_DISTANCE_M)
+        ]
+        fkb_areal_out = pd.Series(float("nan"), index=culverts.index)
+        fkb_poly_priority = {}  # polygon position -> best priority seen (2=Absolutt/red, 1=Partiell/orange)
+        for i in target_idx:
+            source = int(fkb_nearest_idx.loc[i])
+            category = culverts.loc[i, "barrier_category"]
+            priority = BARRIER_PRIORITY[category]
+            other_stops = absolutt_fkb_polys - {source}
+            reached = trace_fkb_upstream(fkb_flow_graph, source, other_stops)
+            fkb_areal_out.loc[i] = float(fkb.geometry.iloc[list(reached)].area.sum())
+            for poly in reached:
+                fkb_poly_priority[poly] = max(fkb_poly_priority.get(poly, 0), priority)
+
+        culverts["oppstrom_fkb_areal_m2"] = fkb_areal_out.values
+        n_traced = int(fkb_areal_out.notna().sum())
+        if n_traced > 1:
+            culverts["prioriteringsscore_fkb"] = (
+                culverts["oppstrom_fkb_areal_m2"].rank(pct=True, method="average") * 100
+            ).round().astype("Int64")
+        print(
+            f"  traced {n_traced} of {n_fkb_confirmed} (elevation unknown at that polygon, or no "
+            f"directed path reaches anywhere, for the rest) -- oppstrom_fkb_areal_m2 and "
+            f"prioriteringsscore_fkb added for these. NOT blended into the main prioriteringsscore "
+            f"above: an area of FKB-Vann polygons at coarser (~polygon-level) resolution isn't "
+            f"really comparable to Elvenett's precise river-length figure, so this is ranked only "
+            f"among these culverts, separately."
+        )
+
+        for poly, priority in fkb_poly_priority.items():
+            geom_wgs84 = gpd.GeoSeries([fkb.geometry.iloc[poly]], crs=WORK_CRS).to_crs("EPSG:4326").iloc[0]
+            color = {2: BARRIER_COLORS["Absolutt"], 1: BARRIER_COLORS["Partiell"]}[priority]
+            fkb_colored_features.append(
+                {"type": "Feature", "geometry": mapping(geom_wgs84), "properties": {"farge": color}}
+            )
+        print(f"  {len(fkb_colored_features)} FKB-Vann polygon(s) coloured for the map")
+    elif n_fkb_confirmed:
+        print(
+            f"  ({n_fkb_confirmed} culvert(s) could be traced on FKB-Vann too -- pass --dtm or "
+            "--hoyde-api to also colour/score them there, using elevation-inferred flow direction)"
+        )
+
+    with open(OUT_FKB_GEOJSON, "w", encoding="utf-8") as f:
+        json.dump({"type": "FeatureCollection", "features": fkb_colored_features}, f, ensure_ascii=False, default=str)
+    if fkb_colored_features:
+        print(f"Saved {OUT_FKB_GEOJSON}")
+
+    if cleanup_elevation is not None:
+        cleanup_elevation()
 
     OUT_CSV.parent.mkdir(parents=True, exist_ok=True)
     culverts.drop(columns="geometry", errors="ignore").to_csv(OUT_CSV, index=False)

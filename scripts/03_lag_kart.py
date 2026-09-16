@@ -91,6 +91,7 @@ IN_GEOJSON_NATURAL_FELT = ROOT / "data" / "processed" / "naturlige_hindre_felt.g
 IN_GEOJSON_LAKES = ROOT / "data" / "processed" / "innsjoer.geojson"
 IN_KOMMUNE_GRENSE = ROOT / "data" / "raw" / "kommunegrense" / "arendal_4203.geojson"
 IN_FKB_VANN_SHP = ROOT / "data" / "raw" / "fkb_vann" / "fkb_vann_omrade_arendal.shp"
+IN_GEOJSON_FKB_FARGET = ROOT / "data" / "processed" / "fkb_vann_farget.geojson"
 OUT_HTML = ROOT / "output" / "agder_kulvert_kart.html"
 
 FKB_VANN_COLOR = "#00838f"
@@ -251,6 +252,13 @@ def build_popup_html(row, has_height, has_snap, has_feltdata):
                 f"prioriteringsscore og elvestrekning ville vært beregnet fra feil/urelatert bekk. "
                 f"Ikke vist under.<br>"
             )
+        if pd.notna(row.get("oppstrom_fkb_areal_m2")):
+            html += (
+                "<i>I stedet sporet oppstrøms på FKB-Vann (elevasjonsbasert retning, siden "
+                "FKB-Vann selv ikke har strømningsretning):</i><br>"
+            )
+            html += field("Prioriteringsscore på FKB-Vann (0-100, kun blant disse)", row.get("prioriteringsscore_fkb"))
+            html += field("Oppstrøms FKB-Vann-areal som åpnes", row.get("oppstrom_fkb_areal_m2"), " m2")
         html += field("Prioriteringsscore (0-100)", row.get("prioriteringsscore"))
         html += field("Oppstrøms elvestrekning som åpnes", row.get("oppstrom_lengde_km"), " km")
         html += field("Oppstrøms innsjøareal som åpnes", row.get("oppstrom_innsjo_km2"), " km2")
@@ -375,9 +383,31 @@ def add_fkb_vann_layer(m, geojson):
     group.add_to(m)
 
 
+def add_fkb_vann_colored_layer(m, geojson):
+    """FKB-Vann polygons actually traced upstream of a barrier (step 4,
+    --dtm/--hoyde-api only) -- red/orange, same meaning and colours as
+    the Elvenett river layer, drawn on top of the plain teal FKB-Vann
+    layer so the handful of culverts Elvenett can't trace (score_upalitelig)
+    still get a real, visible "what's blocked" answer. Coarser than
+    Elvenett's colouring: whole FKB-Vann polygons (~10-50 m each) are
+    coloured as a unit, not split at an exact metre-level cut point,
+    since FKB-Vann has no within-polygon position to cut at."""
+    group = folium.FeatureGroup(name="FKB-Vann oppstrøms (elevasjonsbasert)", show=True)
+    folium.GeoJson(
+        geojson,
+        style_function=lambda feature: {
+            "color": feature["properties"]["farge"],
+            "weight": 1,
+            "fillColor": feature["properties"]["farge"],
+            "fillOpacity": 0.6,
+        },
+    ).add_to(group)
+    group.add_to(m)
+
+
 def add_legend(
     m, has_rivers, has_score, has_natural, has_natural_felt, has_snap_warning, has_fkb_vann=False,
-    has_unreliable_score=False, has_lakes=False, has_kommune_outline=False,
+    has_unreliable_score=False, has_lakes=False, has_kommune_outline=False, has_fkb_traced=False,
 ):
     rows = ""
     if has_score:
@@ -419,6 +449,11 @@ def add_legend(
                 f"background:{color};margin-right:6px;vertical-align:middle'></span>"
                 f"{label}</div>"
             )
+    if has_fkb_traced:
+        rows += (
+            "<div style='margin:2px 0;font-size:11px;color:#555'>(samme rødt/oransje på "
+            "FKB-Vann = spor oppstrøms der elvenett ikke rekker, se \"FKB-Vann oppstrøms\")</div>"
+        )
     if has_fkb_vann:
         rows += (
             f"<div style='margin:2px 0'>"
@@ -685,6 +720,11 @@ def main():
         print(f"(no {IN_FKB_VANN_SHP} found -- place an FKB-Vann export")
         print(" (same file scripts/08_sjekk_fkb_vann.py uses) there to show it on the map)")
 
+    fkb_farget_geojson = load_geojson(IN_GEOJSON_FKB_FARGET)
+    if fkb_farget_geojson is not None and fkb_farget_geojson["features"]:
+        add_fkb_vann_colored_layer(m, fkb_farget_geojson)
+        print(f"Added FKB-Vann upstream-trace layer ({len(fkb_farget_geojson['features'])} coloured polygons)")
+
     if natural_geojson is not None and natural_geojson["features"]:
         add_natural_barrier_layer(m, natural_geojson)
 
@@ -731,6 +771,7 @@ def main():
         "score_upalitelig" in df.columns and bool(df["score_upalitelig"].any()),
         lake_geojson is not None,
         kommune_geojson is not None,
+        fkb_farget_geojson is not None and bool(fkb_farget_geojson["features"]),
     )
     folium.LayerControl(collapsed=False).add_to(m)
 

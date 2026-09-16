@@ -193,7 +193,7 @@ def make_api_elevation_lookup(work_crs, cache_path):
             return cache[key]
         try:
             r = session.get(
-                API_URL, params={"nord": lat, "ost": lon, "koordsystemkode": 4326, "geojson": "false"}, timeout=10
+                API_URL, params={"nord": lat, "ost": lon, "koordsys": 4326, "geojson": "false"}, timeout=10
             )
             r.raise_for_status()
             punkter = r.json().get("punkter") or []

@@ -80,7 +80,7 @@ def fetch_height(session, lat, lon):
     unreachable, or the response doesn't look as expected -- we never
     want one bad point to crash the whole run.
     """
-    params = {"nord": lat, "ost": lon, "koordsystemkode": 4326, "geojson": "false"}
+    params = {"nord": lat, "ost": lon, "koordsys": 4326, "geojson": "false"}
     try:
         r = session.get(API_URL, params=params, timeout=10)
         r.raise_for_status()

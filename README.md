@@ -69,12 +69,14 @@ It shows:
   can see exactly where the kommune -- and so this map's coverage --
   actually ends, and the map now zooms to fit the whole kommune by
   default instead of just tightly around the culvert points.
-- *(If you ran step 4 with `--dtm`)* a small triangle icon at every
-  spot the river's slope suggests a **natural** barrier (a waterfall or
-  rapid too steep for fish regardless of any culvert) -- solid purple
-  for a confident flag, pale/outline purple for "worth checking in the
-  field, not certain". A confident natural barrier also stops the
-  upstream-habitat colouring, same as another culvert would.
+- *(If you ran step 4 with `--dtm` or `--hoyde-api`, as the shipped map
+  does)* a small triangle icon at every spot the river's slope suggests
+  a **natural** barrier (a waterfall or rapid too steep for fish
+  regardless of any culvert) -- solid purple for a confident flag,
+  pale/outline purple for "worth checking in the field, not certain". A
+  confident natural barrier also stops the upstream-habitat colouring,
+  same as another culvert would. 33 confident + 30 possible on the real
+  Arendal river network.
 - *(If you ran step 5)* **lakes**, as NVE's own real lake polygons --
   an actual *area*, not just a line, and real measured data (not
   estimated), shown filled in blue with their own legend entry. Lakes
@@ -86,6 +88,13 @@ It shows:
   isn't a network, so the two datasets are shown side by side rather
   than merged, letting you see at a glance where one has a stream the
   other doesn't.
+- *(If step 4 traced any -- needs `--dtm`/`--hoyde-api`)* those same
+  FKB-Vann polygons **coloured red/orange** on top of the plain teal
+  layer, for the handful of culverts Elvenett can't trace at all (see
+  the black-ring bullet below) -- direction inferred from elevation
+  since FKB-Vann has none of its own. Same colour meaning as the
+  Elvenett layer, just coarser (whole ~10-50 m polygons, not an exact
+  cut point).
 - *(If step 4 found any)* a **black dashed ring** around a culvert
   whose Elvenett edge is more than 50 m from its field coordinate -- not
   genuinely a migration barrier *on* that stream, so it doesn't colour
@@ -281,6 +290,35 @@ where the priority score is worked out. It:
    we're confident they're real barriers, just not on a stream Elvenett
    maps there; the other 6 lack even that confirmation, so the field
    coordinate itself might simply be off.
+
+   **For those 7 FKB-confirmed culverts, step 4 also traces upstream on
+   FKB-Vann itself** (if `--dtm`/`--hoyde-api` is given -- the same
+   elevation source used for natural-barrier detection below), so they
+   still get a real, computed answer instead of nothing. FKB-Vann
+   carries no flow-direction data of its own (unlike Elvenett, digitized
+   upstream-to-downstream), so direction is *inferred from elevation*:
+   one lookup per touching FKB-Vann polygon (its centroid), with water
+   assumed to flow from the higher-elevation polygon to the lower one.
+   The walk itself works the same way as Elvenett's -- follow the
+   directed graph upstream, stop at another barrier culvert's polygon --
+   just at whole-polygon granularity (~10-50 m chunks) since FKB-Vann
+   has no within-polygon position to cut at more precisely. Results:
+   `oppstrom_fkb_areal_m2` (an area, since FKB-Vann is polygons, not the
+   line-length `oppstrom_lengde_km` Elvenett gives) and
+   `prioriteringsscore_fkb`, a 0-100 score -- but ranked **only among
+   these FKB-traced culverts**, not blended into the main
+   `prioriteringsscore` above: an area of coarse FKB-Vann polygons isn't
+   really comparable to Elvenett's precise river-length figure, and
+   inventing an exchange rate between them would have the same
+   unfounded-precision problem this project already avoided once for
+   river-length-vs-lake-area (see point 5 below). The traced polygons
+   are coloured red/orange on the map the same way Elvenett's are (see
+   step 3) -- on the real Arendal run, all 7 of 7 were traced
+   successfully (elevation was known for all 1,457 FKB-Vann polygons),
+   giving 9 coloured polygons in total; the areas involved are small
+   (tens to under a thousand m2 each), which makes sense -- these are
+   specifically the streams too small/disconnected for Elvenett to map
+   at all, in either dataset.
 3. **Walks upstream** through the network graph from that snapped
    point, collecting every segment that genuinely becomes reachable --
    handling branches/tributaries correctly, without double-counting --
@@ -357,15 +395,29 @@ of the script if you want to tune them.
 Without either flag, natural-barrier detection is simply skipped and
 only Absolutt culverts stop the walk -- everything else still works.
 
-*(The gradient classification itself was validated against small
-hand-built test rasters with known slopes in them -- 12%, 8%, and 3%
-steps, correctly sorted into "certain"/"cautious"/"not flagged". The
-`--hoyde-api` plumbing (coordinate conversion, caching, the live HTTP
-call) was validated by mocking the API response end-to-end -- correct
-coordinates were sent and the results flowed through correctly -- but
-neither path has been run against real elevation data for Arendal yet,
-since this sandbox can't reach Kartverket's service and we don't have
-a downloaded DTM file either.)*
+*(The gradient classification was originally validated only against
+small hand-built test rasters with known slopes in them -- 12%, 8%, and
+3% steps, correctly sorted into "certain"/"cautious"/"not flagged" --
+and the `--hoyde-api` plumbing only by mocking the API response,
+because the environment this was first built in had no route to
+Kartverket's service. **`--hoyde-api` has since been run for real** --
+see the note below the API's own name for a real bug that blocked it
+until now. On the real Arendal run: 33 confident natural barriers (stop
+the walk) and 30 possible ones (flagged, don't stop it), out of 883
+river segments.)*
+
+**A real bug was hiding behind "never run against real data": the
+elevation API's coordinate-system parameter was wrong.** The code sent
+`koordsystemkode=4326`; Kartverket's `hoydedata` API actually expects
+`koordsys=4326` -- every single request came back
+`422 UNPROCESSABLE ENTITY`, silently returning no elevation for every
+point (steps 2, 4, and 9 all made this same call). Since this had only
+ever been tested by mocking the HTTP response, not a real call, nothing
+caught the wrong parameter name until `--hoyde-api` was actually run
+for the first time. Fixed in all three scripts; if you have an old
+`data/processed/hoyde_cache*.json` from before this fix, delete it --
+it's full of cached `null`s from the broken calls and will otherwise
+make the fix look like it's still not returning data.
 
 **Where to get the river data:** an NVE map data export
 (`nedlasting.nve.no`) for the kommune you want to cover. The `.zip`
@@ -709,17 +761,27 @@ Kartverket web service steps 2 and 4 use) queries the *same* underlying
 height model, just one point at a time over the internet -- use it if
 you'd rather not download a DTM file first.
 
-**Tested with a synthetic DTM (an 8 m drop over 30 m, injected into a
-raster covering the real Arendalsvassdraget main-stem geometry), not
-real elevation data** -- this sandbox has no route to Kartverket's
-services (see the earlier elevation-data discussion in this project).
-The synthetic test confirmed the main-stem finding, sampling, and
-candidate-detection logic all work correctly: the injected drop was
-located at the right distance along the river, and -- correctly -- only
-triggered the "mulig" (cautious) tier rather than "sikker", since a
-narrow 30 m drop gets diluted by the 100 m smoothing window, same
-behaviour as step 4. Real elevation data will behave differently; this
-just confirms the mechanics are sound.
+**Now run for real, with `--hoyde-api`, after fixing the elevation-API
+bug described above.** Originally only tested with a synthetic DTM (an
+8 m drop over 30 m injected into a raster covering the real
+Arendalsvassdraget main-stem geometry) -- that synthetic test confirmed
+the main-stem finding, sampling, and candidate-detection logic all work
+correctly, but said nothing about whether the *method* flags real
+waterfalls, only that the code runs.
+
+The real run found the main stem (52 segments, 17.3 km, out of 487
+segments matching "Arendalsvassdraget" in `hierarki` -- 26 disconnected
+pieces were found and correctly excluded, using only the largest
+connected piece) and produced a genuinely clean-looking result: a flat
+~39 m plateau from km 4-8.5 (almost certainly a lake), then a sharp,
+obvious step from ~48 m to ~123 m between km 12.5 and 14 -- and the
+method correctly flagged that step and nowhere else: **4 confident +
+4 possible candidates, all of them right on that one step, zero false
+positives on the flat stretches either side.** See
+`output/hoydeprofil_arendalsvassdraget.png`. This doesn't confirm any
+specific named waterfall (that needs local knowledge this project
+doesn't have), but it's a strong sign the smoothed-gradient method
+genuinely tracks real terrain, not just the synthetic test case.
 
 ## Setup
 
@@ -727,15 +789,15 @@ just confirms the mechanics are sound.
 pip install -r requirements.txt
 python scripts/01_rens_kulvertdata.py
 python scripts/02_hent_hoydedata.py       # optional, needs internet, can take a while
-python scripts/04_koble_til_elvenett.py --river data/raw/nve_elvenett/Elv_Elvenett.shp --kommune Arendal --innsjo data/raw/nve_innsjo/Innsjo_Innsjo.shp --fkb data/raw/fkb_vann/fkb_vann_omrade_arendal.shp
+python scripts/04_koble_til_elvenett.py --river data/raw/nve_elvenett/Elv_Elvenett.shp --kommune Arendal --innsjo data/raw/nve_innsjo/Innsjo_Innsjo.shp --fkb data/raw/fkb_vann/fkb_vann_omrade_arendal.shp --hoyde-api
 python scripts/05_legg_til_innsjoer.py    # optional, lake map layer
 python scripts/06_legg_til_feltdata.py --kommune Arendal   # optional, real field-assessment data
 python scripts/03_lag_kart.py
 python scripts/07_lag_rapport.py --kommune Arendal --antall 5   # optional, Word report + draft søknad
 ```
 
-A ready-made map (Arendal, with the coloured river network but without
-the optional elevation step) is already included at
+A ready-made map (Arendal, with the coloured river network AND real
+natural-barrier detection from `--hoyde-api`) is already included at
 `output/agder_kulvert_kart.html`, so you can open it right away and
 re-run the pipeline later if you want to add height data, cover another
 kommune, or refresh the source data.
@@ -798,12 +860,12 @@ time you view it.
   `--hoyde-api`) -- without either, only other Absolutt culverts stop
   the upstream walk, so a stretch of river blocked by a natural
   waterfall higher up (with no culvert involved) would still show as
-  "opened up". This is also why the shipped map has no natural-barrier
-  icons on it at all: neither flag was passed when it was built, since
-  this sandbox can't reach Kartverket's API and there's no downloaded
-  DTM file in the project either -- the check was skipped, not run and
-  found nothing. Pass `--hoyde-api` yourself (needs internet, no
-  download) to actually see this layer.
+  "opened up". **The shipped map now includes this** -- step 4 is run
+  with `--hoyde-api` (see Setup below), which found 33 confident and 30
+  possible natural barriers on the real Arendal river network. A DTM
+  file (`--dtm`) would be faster and work offline, but hasn't been
+  tried against real Arendal data yet -- worth doing if you get one, as
+  a cross-check against the API-based result.
 - **Lake area in the score uses surface area only, not depth** -- NVE's
   export has no bathymetry on file for any of the 201 Arendal lakes
   (see step 5). A wide, shallow pond and a deep lake of the same
@@ -850,13 +912,13 @@ output/                     the final map (agder_kulvert_kart.html) + the priori
 If you're asking a GIS colleague for anything, these are the gaps this
 project actually ran into (in rough order of impact):
 
-- **A real elevation raster (DTM) for Arendal**, or confirmation that
-  Kartverket's høydedata service has good coverage here -- this project
-  currently has to fetch elevation one point at a time over the
-  internet (`--hoyde-api`) instead of using a proper terrain model, and
-  neither path has actually been run against real data yet in this
-  environment (see step 4). A downloaded DTM `.tif` would make natural
-  (waterfall/rapid) barrier detection both faster and offline-capable.
+- **A real elevation raster (DTM) for Arendal.** `--hoyde-api` now works
+  and has confirmed Kartverket's høydedata service has good coverage
+  here (elevation known for 100% of both the Elvenett segments and the
+  FKB-Vann polygons sampled -- see step 4), but it fetches one point at
+  a time over the internet. A downloaded DTM `.tif` would be faster and
+  offline-capable, and worth getting as a cross-check against the
+  API-based natural-barrier result.
 - **Vann-Nett water body polygons with the "Anadrom fisk" attribute**
   for Arendal's streams/lakes -- this is the authoritative national
   register for where anadromous fish are actually present, and would
